@@ -1,0 +1,34 @@
+# Build artifacts
+build/
+build-*/
+_build/
+dist/
+*.o
+*.so
+*.a
+
+# Packaging (CI-generated staging dirs - see scripts/ and .woodpecker/)
+stage-root*/
+stage-bundle*/
+.pkg-manifest-stage/
+
+# Meson
+meson-logs/
+meson-private/
+
+# Rust
+target/
+Cargo.lock
+
+# Go
+*.exe
+/bin/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editors / OS
+*~
+*.swp
+.DS_Store
