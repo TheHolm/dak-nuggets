@@ -56,4 +56,35 @@ gboolean nm_consider(NextMeeting *nm, gboolean is_date, time_t start);
  */
 gchar *nm_format(const NextMeeting *nm);
 
+/**
+ * nm_expand_escapes:
+ * @text: (nullable): the text whose backslash escapes should be expanded
+ *
+ * Expands the escapes "\n", "\t" and "\\" in @text into a newline, a tab and
+ * a literal backslash respectively. Any other backslash sequence is copied
+ * through unchanged, as is a trailing backslash.
+ *
+ * Returns: (transfer full) (nullable): a newly allocated string, or NULL if
+ *          @text is NULL; free with g_free().
+ */
+gchar *nm_expand_escapes(const char *text);
+
+/**
+ * nm_decorate:
+ * @nm: the search state to render
+ * @before: (nullable): text to place before the time, or NULL for none
+ * @after: (nullable): text to place after the time, or NULL for none
+ *
+ * Renders @nm like nm_format(), wrapped in the optional @before and @after
+ * decoration. Escapes in @before and @after are expanded with
+ * nm_expand_escapes(), so newlines and tabs can be embedded from the command
+ * line. The decoration applies equally to the "----" no-meeting marker. The
+ * caller is responsible for any trailing newline.
+ *
+ * Returns: (transfer full): a newly allocated string; free with g_free().
+ */
+gchar *nm_decorate(const NextMeeting *nm,
+                   const char *before,
+                   const char *after);
+
 #endif /* NEXT_MEETING_H */

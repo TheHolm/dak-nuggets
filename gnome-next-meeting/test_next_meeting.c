@@ -152,6 +152,98 @@ test_reinit_clears_state(void)
     g_assert_cmpstr(out, ==, "----");
 }
 
+/**
+ * Escape expansion turns "\n", "\t" and "\\" into their literal characters.
+ */
+static void
+test_expand_escapes(void)
+{
+    g_autofree gchar *out = nm_expand_escapes("a\\nb\\tc\\\\d");
+
+    g_assert_cmpstr(out, ==, "a\nb\tc\\d");
+}
+
+/**
+ * Unrecognised escapes and a trailing backslash are preserved verbatim.
+ */
+static void
+test_expand_escapes_passthrough(void)
+{
+    g_autofree gchar *out = nm_expand_escapes("100% \\q \\");
+
+    g_assert_cmpstr(out, ==, "100% \\q \\");
+}
+
+/**
+ * A NULL input yields NULL, so optional decoration is a no-op.
+ */
+static void
+test_expand_escapes_null(void)
+{
+    g_assert_null(nm_expand_escapes(NULL));
+}
+
+/**
+ * Decoration is placed on either side of the time, with escapes expanded.
+ */
+static void
+test_decorate_both_sides(void)
+{
+    NextMeeting nm;
+    nm_init(&nm, NOW);
+    g_assert_true(nm_consider(&nm, FALSE, NOW + 90 * 60));
+
+    g_autofree gchar *out = nm_decorate(&nm, "In\\n", " to go");
+
+    g_assert_cmpstr(out, ==, "In\n01:30 to go");
+}
+
+/**
+ * Missing (NULL) decoration on either side simply yields the bare time.
+ */
+static void
+test_decorate_no_decoration(void)
+{
+    NextMeeting nm;
+    nm_init(&nm, NOW);
+    g_assert_true(nm_consider(&nm, FALSE, NOW + 60));
+
+    g_autofree gchar *out = nm_decorate(&nm, NULL, NULL);
+
+    g_assert_cmpstr(out, ==, "00:01");
+}
+
+/**
+ * Decoration also applies to the "----" no-meeting marker.
+ */
+static void
+test_decorate_no_meeting(void)
+{
+    NextMeeting nm;
+    nm_init(&nm, NOW);
+
+    g_autofree gchar *out = nm_decorate(&nm, "[", "]");
+
+    g_assert_cmpstr(out, ==, "[----]");
+}
+
+/**
+ * A NULL decoration on only one side still combines correctly.
+ */
+static void
+test_decorate_one_side(void)
+{
+    NextMeeting nm;
+    nm_init(&nm, NOW);
+    g_assert_true(nm_consider(&nm, FALSE, NOW + 30 * 60));
+
+    g_autofree gchar *before = nm_decorate(&nm, "<", NULL);
+    g_autofree gchar *after = nm_decorate(&nm, NULL, ">");
+
+    g_assert_cmpstr(before, ==, "<00:30");
+    g_assert_cmpstr(after, ==, "00:30>");
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -166,6 +258,13 @@ main(int argc, char *argv[])
     g_test_add_func("/next-meeting/nearest-wins", test_nearest_meeting_wins);
     g_test_add_func("/next-meeting/multi-hour", test_multi_hour_formatting);
     g_test_add_func("/next-meeting/reinit-clears-state", test_reinit_clears_state);
+    g_test_add_func("/next-meeting/expand-escapes", test_expand_escapes);
+    g_test_add_func("/next-meeting/expand-escapes-passthrough", test_expand_escapes_passthrough);
+    g_test_add_func("/next-meeting/expand-escapes-null", test_expand_escapes_null);
+    g_test_add_func("/next-meeting/decorate-both-sides", test_decorate_both_sides);
+    g_test_add_func("/next-meeting/decorate-no-decoration", test_decorate_no_decoration);
+    g_test_add_func("/next-meeting/decorate-no-meeting", test_decorate_no_meeting);
+    g_test_add_func("/next-meeting/decorate-one-side", test_decorate_one_side);
 
     return g_test_run();
 }

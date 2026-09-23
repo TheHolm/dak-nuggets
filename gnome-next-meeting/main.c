@@ -50,9 +50,48 @@ instance_cb(ICalComponent *component,
 
 
 int
-main(void)
+main(int argc, char *argv[])
 {
     GError *error = NULL;
+
+    /*
+     * Optional text wrapped around the countdown. Escapes such as "\n" are
+     * expanded by nm_decorate().
+     */
+    g_autofree gchar *before = NULL;
+    g_autofree gchar *after = NULL;
+
+    GOptionEntry options[] = {
+        {
+            "before", 'b', 0, G_OPTION_ARG_STRING, &before,
+            "text to print before the time (\\n, \\t and \\\\ are expanded)",
+            "TEXT"
+        },
+        {
+            "after", 'a', 0, G_OPTION_ARG_STRING, &after,
+            "text to print after the time (\\n, \\t and \\\\ are expanded)",
+            "TEXT"
+        },
+        { NULL }
+    };
+
+    GOptionContext *context = g_option_context_new(NULL);
+
+    g_option_context_add_main_entries(context, options, NULL);
+
+    /*
+     * g_option_context_parse() also handles --help (printing this option
+     * summary and exiting) and reports unknown options.
+     */
+    if (!g_option_context_parse(context, &argc, &argv, &error)) {
+        fprintf(stderr, "%s\n",
+                error ? error->message : "option parsing failed");
+        g_clear_error(&error);
+        g_option_context_free(context);
+        return 1;
+    }
+
+    g_option_context_free(context);
 
     /*
      * Current time.
@@ -167,7 +206,7 @@ main(void)
     g_list_free_full(sources, g_object_unref);
     g_object_unref(registry);
 
-    gchar *out = nm_format(&nm);
+    gchar *out = nm_decorate(&nm, before, after);
 
     printf("%s\n", out);
 

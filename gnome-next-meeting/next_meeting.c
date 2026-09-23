@@ -60,3 +60,67 @@ nm_format(const NextMeeting *nm)
 
     return g_strdup_printf("%02ld:%02ld", hours, minutes);
 }
+
+gchar *
+nm_expand_escapes(const char *text)
+{
+    if (text == NULL) {
+        return NULL;
+    }
+
+    GString *out = g_string_new(NULL);
+
+    for (const char *p = text; *p != '\0'; p++) {
+        if (*p != '\\') {
+            g_string_append_c(out, *p);
+            continue;
+        }
+
+        /*
+         * A backslash introduces an escape. Recognised ones are replaced;
+         * anything else (including a trailing backslash) is kept verbatim so
+         * arbitrary text survives untouched.
+         */
+        switch (p[1]) {
+        case 'n':
+            g_string_append_c(out, '\n');
+            p++;
+            break;
+        case 't':
+            g_string_append_c(out, '\t');
+            p++;
+            break;
+        case '\\':
+            g_string_append_c(out, '\\');
+            p++;
+            break;
+        default:
+            g_string_append_c(out, '\\');
+            break;
+        }
+    }
+
+    return g_string_free(out, FALSE);
+}
+
+gchar *
+nm_decorate(const NextMeeting *nm,
+            const char *before,
+            const char *after)
+{
+    gchar *prefix = nm_expand_escapes(before);
+    gchar *body = nm_format(nm);
+    gchar *suffix = nm_expand_escapes(after);
+
+    gchar *out =
+        g_strconcat(prefix ? prefix : "",
+                    body,
+                    suffix ? suffix : "",
+                    NULL);
+
+    g_free(prefix);
+    g_free(body);
+    g_free(suffix);
+
+    return out;
+}

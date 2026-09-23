@@ -1,5 +1,5 @@
 project('gnome-next-meeting', 'c',
-  version: '0.1.0',
+  version: '0.2.0',
   license: 'AGPL-3.0-or-later',
   default_options: ['c_std=c99', 'warning_level=2'])
 

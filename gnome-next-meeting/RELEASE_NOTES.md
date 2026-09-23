@@ -1,5 +1,16 @@
 # Release notes — gnome-next-meeting
 
+## v0.2.0
+
+- New `--before` / `--after` options (short `-b` / `-a`) wrap the countdown
+  output with arbitrary text, and `\n`, `\t` and `\\` in that text are
+  expanded, so newlines can be added around the time. The decoration also
+  applies to the `----` no-meeting marker.
+- `--help` now prints a usage summary of the available options.
+- Low-level: option parsing uses GLib's `GOptionContext`; the escape
+  expansion and decoration logic lives in the testable `next_meeting.c`
+  (`nm_expand_escapes()`, `nm_decorate()`) and is covered by new unit tests.
+
 ## v0.1.0
 
 - Initial version: prints the time remaining until the next calendar event

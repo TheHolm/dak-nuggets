@@ -6,7 +6,8 @@ more; don't let it go stale.
 ## Purpose
 
 Prints `HH:MM` until the next event that starts later today, or `----` when
-there is none. Intended to be run by DAK via `text_exec`.
+there is none. Intended to be run by DAK via `text_exec`. The countdown can
+optionally be wrapped with `--before` / `--after` text.
 
 ## Dependencies / build
 
@@ -20,18 +21,21 @@ there is none. Intended to be run by DAK via `text_exec`.
 ## Test layout
 
 The decision/formatting logic lives in `next_meeting.c` / `next_meeting.h`
-(the `NextMeeting` state, `nm_consider()`, `nm_format()`), deliberately split
-out from `main.c` so it can be tested with plain `time_t` values and no
+(the `NextMeeting` state, `nm_consider()`, `nm_format()`, plus the
+`nm_expand_escapes()` / `nm_decorate()` decoration helpers), deliberately
+split out from `main.c` so it can be tested with plain `time_t` values and no
 Evolution Data Server, D-Bus session, or `ICalTime` objects. `main.c` keeps
-only the EDS glue (registry, calendars, `i_cal_time_*` conversion) and the
+only the EDS glue (registry, calendars, `i_cal_time_*` conversion), the
 `instance_cb` adapter that translates an `ICalTime` instance into a call to
-`nm_consider()`.
+`nm_consider()`, and the GLib `GOptionContext` command-line parsing.
 
 `test_next_meeting.c` uses GLib's `GTest` framework and covers: the `----`
 marker, future-meeting formatting, sub-minute truncation, ignoring
 already-started meetings, ignoring all-day events, nearest-wins ordering
 (including that a later meeting does not displace a nearer one already
-found), multi-hour zero-padding, and re-init clearing state. Run them with
+found), multi-hour zero-padding, re-init clearing state, escape expansion
+(`\n`, `\t`, `\\`, passthrough of unrecognised/trailing backslashes, NULL),
+and decoration (both/one/no sides, and the `----` marker). Run them with
 `make test` (or `meson test -C build`).
 
 ## Behaviour / quirks
@@ -48,6 +52,13 @@ found), multi-hour zero-padding, and re-init clearing state. Run them with
 - The nearest future start time wins; ties are not specially handled.
 - Output is zero-padded `%02ld:%02ld`, so it is always exactly five characters
   (`HH:MM`) or four (`----`).
+- `--before` / `--after` wrap the rendered time (or the `----` marker); the
+  program appends a single trailing newline after the decoration. Escapes
+  `\n`, `\t` and `\\` in the supplied text are expanded by
+  `nm_expand_escapes()`; any other backslash sequence (including a trailing
+  one) is passed through unchanged. Option parsing uses GLib's
+  `GOptionContext`, which also provides `--help` and unknown-option handling
+  for free.
 
 ## API gotcha: `e_cal_client_connect_sync` return type
 
