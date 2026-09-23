@@ -5,29 +5,36 @@
 # requests, and tags themselves are always created manually - this workflow
 # never creates one itself.
 #
-# dak-nuggets packages more than one program under one repo (see AGENTS.md),
-# each independently versioned. Every tagged release rebuilds and republishes
-# EVERY program's packages at their current versions, plus one additional
-# "bundle" package per target that contains every program together. There is
-# no dynamic matrix over repo contents here - Woodpecker YAML can't loop over
-# directories - so adding a new program means manually adding its own three
-# steps (deb-trixie, deb-ubuntu2604, freebsd-pkg) below, plus wiring it into
-# the three bundle-* steps. See NOTES.md's "Adding a new program's release
-# steps" checklist before adding one.
+# There is exactly one build step per target platform:
 #
-# Per program, per target, independent of every other program/target
-# (`depends_on: []` puts the whole workflow into DAG mode, so they all run
-# concurrently); each bundle-* step depends only on the individual steps for
-# its own target; publish-github-release waits for everything.
+#   build-deb-trixie      Debian trixie .deb packages
+#   build-deb-ubuntu2604  Ubuntu 26.04 LTS .deb packages
+#   build-freebsd-pkg     FreeBSD .pkg packages (best effort, see below)
+#
+# Each step sets up its target's build environment once and then builds every
+# program (discovered by the presence of a `<program>/ci-deb.sh` or
+# `<program>/ci-freebsd.sh` script) plus the combined "all programs" bundle
+# package for that target. This avoids standing up a separate build
+# environment per program, which would get expensive fast. The per-program,
+# per-language build recipes live in the program directories; the shared
+# packaging mechanics live in scripts/ - see NOTES.md.
+#
+# The three steps are independent of each other (`depends_on: []` puts the
+# workflow into DAG mode, so they run concurrently; publish-github-release
+# waits for all of them). Because CI steps share one workspace, every step
+# writes to target-specific build/stage directories and each per-program
+# script wipes its own build directory first, so concurrent steps (and
+# re-runs in a persisted workspace) can never collide on a stale Meson build
+# directory - see NOTES.md.
 #
 # FreeBSD packaging never uses a real FreeBSD host: the base system
-# (libc/CRT) comes from selectively extracting the official base.txz release
-# set, and each program's own native dependency closure (e.g.
+# (libc/CRT/headers) comes from selectively extracting the official base.txz
+# release set, and each program's own native dependency closure (e.g.
 # evolution-data-server for gnome-next-meeting) is resolved live against the
 # real FreeBSD package repository by scripts/fetch-freebsd-deps.py - see
 # NOTES.md. That live-repository layout is not a stable public interface, so
-# every *-freebsd-pkg step is marked `failure: ignore`: a break there never
-# blocks the Linux .deb releases.
+# the FreeBSD step is marked `failure: ignore`: a break there never blocks the
+# Linux .deb releases.
 #
 # Requirements for this to work:
 #   - A `github_token` secret is set on this repo in Woodpecker (Project
@@ -41,60 +48,37 @@ when:
     ref: refs/tags/v*
 
 steps:
-  # ---------------------------------------------------------------------
-  # gnome-next-meeting
-  # ---------------------------------------------------------------------
-
-  - name: gnome-next-meeting-deb-trixie
+  - name: build-deb-trixie
     image: debian:trixie-slim
     depends_on: []
+    environment:
+      # Union of every program's runtime dependencies for this target. See the
+      # "Adding a new program's release steps" checklist in NOTES.md.
+      DEB_DEPENDS: "libecal-2.0-3, libedataserver-1.2-27t64"
     commands:
+      # Union of every program's build dependencies for this target.
       - apt-get update && apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libglib2.0-dev libecal2.0-dev libedataserver1.2-dev dpkg-dev
-      - cd gnome-next-meeting
-      - VERSION=$(grep -m1 "version:" meson.build | sed -E "s/.*version:[[:space:]]*'([^']+)'.*/\1/")
-      - make install DESTDIR=$(pwd)/stage-root-trixie PREFIX=/usr/local
-      - mkdir -p ../dist
-      - >-
-        ../scripts/build-deb.sh
-        --name gnome-next-meeting --version "$VERSION" --revision 1~trixie --arch amd64
-        --stage-root stage-root-trixie
-        --output ../dist/gnome-next-meeting_${VERSION}-1~trixie_amd64.deb
-        --synopsis "Time until the next calendar meeting, for DAK"
-        --description "Prints HH:MM until the next calendar event of the day by reading Evolution Data Server, for use as a DAK text_exec button."
-        --depends "libecal-2.0-3, libedataserver-1.2-27t64"
-      # Fail the release if the binary did not make it into the .deb.
-      - dpkg-deb -c ../dist/gnome-next-meeting_*-1~trixie_amd64.deb | grep -qF 'usr/local/bin/gnome-next-meeting'
+      - ./scripts/build-target-debs.sh "1~trixie" amd64 trixie
 
-  - name: gnome-next-meeting-deb-ubuntu2604
+  - name: build-deb-ubuntu2604
     image: ubuntu:26.04
     depends_on: []
+    environment:
+      # NOTE: these runtime package names/versions (e.g. the "-27t64" suffix)
+      # were verified against Debian trixie only. Ubuntu derives its GNOME
+      # packaging from Debian, so they are expected to match, but this has not
+      # been verified against a real Ubuntu 26.04 archive - re-check with
+      # `apt-cache policy libecal-2.0-3 libedataserver-1.2-27t64` inside an
+      # ubuntu:26.04 container and update if it differs. See NOTES.md.
+      DEB_DEPENDS: "libecal-2.0-3, libedataserver-1.2-27t64"
     commands:
       - apt-get update && apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libglib2.0-dev libecal2.0-dev libedataserver1.2-dev dpkg-dev
-      - cd gnome-next-meeting
-      - VERSION=$(grep -m1 "version:" meson.build | sed -E "s/.*version:[[:space:]]*'([^']+)'.*/\1/")
-      - make install DESTDIR=$(pwd)/stage-root-ubuntu2604 PREFIX=/usr/local
-      - mkdir -p ../dist
-      # NOTE: the exact runtime package names/versions below (e.g. the
-      # "-27t64" suffix) were verified against Debian trixie only - Ubuntu
-      # 26.04 does not exist yet at the time this pipeline was written.
-      # Verify these against the real Ubuntu 26.04 archive once available
-      # (`apt-cache policy libecal-2.0-3 libedataserver-1.2-27t64`) and update
-      # if the suffix differs; see NOTES.md.
-      - >-
-        ../scripts/build-deb.sh
-        --name gnome-next-meeting --version "$VERSION" --revision 1~ubuntu2604 --arch amd64
-        --stage-root stage-root-ubuntu2604
-        --output ../dist/gnome-next-meeting_${VERSION}-1~ubuntu2604_amd64.deb
-        --synopsis "Time until the next calendar meeting, for DAK"
-        --description "Prints HH:MM until the next calendar event of the day by reading Evolution Data Server, for use as a DAK text_exec button."
-        --depends "libecal-2.0-3, libedataserver-1.2-27t64"
-      - dpkg-deb -c ../dist/gnome-next-meeting_*-1~ubuntu2604_amd64.deb | grep -qF 'usr/local/bin/gnome-next-meeting'
+      - ./scripts/build-target-debs.sh "1~ubuntu2604" amd64 ubuntu2604
 
-  - name: gnome-next-meeting-freebsd-pkg
+  - name: build-freebsd-pkg
     image: debian:trixie-slim
     depends_on: []
-    # Best effort: gnome-next-meeting's FreeBSD dependency closure
-    # (evolution-data-server and everything under it) is resolved live
+    # Best effort: each program's FreeBSD dependency closure is resolved live
     # against the real FreeBSD package repository, whose layout is not a
     # stable public interface. A break here is reported but never blocks the
     # Linux releases. See NOTES.md.
@@ -104,13 +88,13 @@ steps:
       PKG_CONFIG_SYSROOT_DIR: /opt/freebsd-sysroot
       PKG_CONFIG_LIBDIR: /opt/freebsd-sysroot/usr/local/libdata/pkgconfig:/opt/freebsd-sysroot/usr/local/lib/pkgconfig
     commands:
+      # Union of every program's build dependencies for this target.
       - apt-get update && apt-get install -y --no-install-recommends clang lld binutils zstd xz-utils python3 meson ninja-build pkg-config curl ca-certificates
       - mkdir -p /opt/freebsd-sysroot
-      # FreeBSD base system for libc/CRT. Every member needs the leading
-      # `./`; extract members explicitly, not via a file list. See
-      # TheHolm/dak's NOTES.md section 1.4a - re-verify this list against a
-      # newer base.txz if scripts/check-target-freshness.sh flags the FreeBSD
-      # pin as stale (sonames do change between releases).
+      # FreeBSD base system. Every member needs the leading `./`; extract
+      # members explicitly, not via a file list. See TheHolm/dak's NOTES.md
+      # section 1.4a - re-verify this list if scripts/check-target-freshness.sh
+      # flags the FreeBSD pin as stale (sonames do change between releases).
       - curl -fsSL -o /tmp/base.txz https://download.freebsd.org/releases/amd64/amd64/15.1-RELEASE/base.txz
       - >-
         tar -xJf /tmp/base.txz -C /opt/freebsd-sysroot
@@ -134,13 +118,17 @@ steps:
       # hit either of these: rustc controls its own link line and never asks
       # clang for `-lgcc`, and it needs no C headers at all. See NOTES.md.
       - rm -f /tmp/base.txz
-      # evolution-data-server and its full dependency closure, fetched from
-      # pkg.freebsd.org - see scripts/fetch-freebsd-deps.py.
+      # Union of every program's FreeBSD dependency closures, fetched from
+      # pkg.freebsd.org - see scripts/fetch-freebsd-deps.py. Add one --root
+      # per program (plus --pkg-config-check for modules to verify resolve).
       - >-
         python3 scripts/fetch-freebsd-deps.py --sysroot /opt/freebsd-sysroot
         --root evolution-data-server
         --pkg-config-check libecal-2.0 --pkg-config-check libedataserver-1.2
         --deps-output /opt/freebsd-deps.json
+      # A generic Meson cross-file for the FreeBSD target, shared by every C
+      # program. (A future non-Meson program - Rust, Go, ... - would need its
+      # own toolchain setup here; that part can't be shared across languages.)
       - >-
         printf '%s\n'
         "[binaries]" "c = 'clang'" "ar = 'ar'" "strip = 'strip'" "pkg-config = 'pkg-config'"
@@ -150,98 +138,14 @@ steps:
         "c_args = ['--target=x86_64-unknown-freebsd15', '--sysroot=/opt/freebsd-sysroot']"
         "c_link_args = ['--target=x86_64-unknown-freebsd15', '--sysroot=/opt/freebsd-sysroot', '-fuse-ld=lld', '-B/opt/freebsd-sysroot/usr/lib']"
         > /opt/freebsd-cross.ini
-      - cd gnome-next-meeting
-      - VERSION=$(grep -m1 "version:" meson.build | sed -E "s/.*version:[[:space:]]*'([^']+)'.*/\1/")
-      - meson setup build-freebsd --cross-file /opt/freebsd-cross.ini --prefix=/usr/local
-      - meson compile -C build-freebsd
-      - mkdir -p stage-root-freebsd/usr/local/bin ../dist
-      - DESTDIR=$(pwd)/stage-root-freebsd meson install -C build-freebsd
-      - >-
-        python3 ../scripts/build-freebsd-pkg.py
-        --name gnome-next-meeting --origin "sysutils/gnome-next-meeting"
-        --version "$VERSION" --stage-root stage-root-freebsd
-        --deps-file /opt/freebsd-deps.json
-        --comment "Time until the next calendar meeting, for DAK"
-        --desc "Prints HH:MM until the next calendar event of the day by reading Evolution Data Server, for use as a DAK text_exec button."
-        --www "https://github.com/TheHolm/dak-nuggets"
-        --output ../dist/gnome-next-meeting-${VERSION}-freebsd-amd64.pkg
-      - zstd -dc ../dist/gnome-next-meeting-*-freebsd-amd64.pkg | tar -tf - | grep -qF 'usr/local/bin/gnome-next-meeting'
-
-  # ---------------------------------------------------------------------
-  # Bundle packages: every program together, one per target. With only one
-  # program in the repo so far these are a trivial superset of its own
-  # package, but the mechanism is in place for when a second program lands -
-  # see NOTES.md's checklist.
-  # ---------------------------------------------------------------------
-
-  - name: bundle-deb-trixie
-    image: debian:trixie-slim
-    depends_on: [gnome-next-meeting-deb-trixie]
-    commands:
-      - apt-get update && apt-get install -y --no-install-recommends dpkg-dev
-      - TAG_VERSION=${CI_COMMIT_TAG#v}
-      - >-
-        ./scripts/merge-stage-roots.sh --output stage-bundle-trixie
-        gnome-next-meeting/stage-root-trixie
-      - >-
-        ./scripts/build-deb.sh
-        --name dak-nuggets --version "$TAG_VERSION" --revision 1~trixie --arch amd64
-        --stage-root stage-bundle-trixie
-        --output dist/dak-nuggets_${TAG_VERSION}-1~trixie_amd64.deb
-        --synopsis "All dak-nuggets helper programs, for DAK"
-        --description "Bundles every dak-nuggets helper program (see README.markdown) into a single package."
-        --depends "libecal-2.0-3, libedataserver-1.2-27t64"
-
-  - name: bundle-deb-ubuntu2604
-    image: ubuntu:26.04
-    depends_on: [gnome-next-meeting-deb-ubuntu2604]
-    commands:
-      - apt-get update && apt-get install -y --no-install-recommends dpkg-dev
-      - TAG_VERSION=${CI_COMMIT_TAG#v}
-      - >-
-        ./scripts/merge-stage-roots.sh --output stage-bundle-ubuntu2604
-        gnome-next-meeting/stage-root-ubuntu2604
-      - >-
-        ./scripts/build-deb.sh
-        --name dak-nuggets --version "$TAG_VERSION" --revision 1~ubuntu2604 --arch amd64
-        --stage-root stage-bundle-ubuntu2604
-        --output dist/dak-nuggets_${TAG_VERSION}-1~ubuntu2604_amd64.deb
-        --synopsis "All dak-nuggets helper programs, for DAK"
-        --description "Bundles every dak-nuggets helper program (see README.markdown) into a single package."
-        --depends "libecal-2.0-3, libedataserver-1.2-27t64"
-
-  - name: bundle-freebsd-pkg
-    image: debian:trixie-slim
-    depends_on: [gnome-next-meeting-freebsd-pkg]
-    failure: ignore
-    commands:
-      - apt-get update && apt-get install -y --no-install-recommends python3 zstd
-      - TAG_VERSION=${CI_COMMIT_TAG#v}
-      - >-
-        ./scripts/merge-stage-roots.sh --output stage-bundle-freebsd
-        gnome-next-meeting/stage-root-freebsd
-      - >-
-        python3 ./scripts/build-freebsd-pkg.py
-        --name dak-nuggets --origin "sysutils/dak-nuggets"
-        --version "$TAG_VERSION" --stage-root stage-bundle-freebsd
-        --comment "All dak-nuggets helper programs, for DAK"
-        --desc "Bundles every dak-nuggets helper program (see README.markdown) into a single package."
-        --www "https://github.com/TheHolm/dak-nuggets"
-        --output dist/dak-nuggets-${TAG_VERSION}-freebsd-amd64.pkg
-
-  # ---------------------------------------------------------------------
-  # Publish
-  # ---------------------------------------------------------------------
+      - ./scripts/build-target-freebsd.sh /opt/freebsd-cross.ini /opt/freebsd-deps.json
 
   - name: publish-github-release
     image: debian:trixie-slim
     depends_on:
-      - gnome-next-meeting-deb-trixie
-      - gnome-next-meeting-deb-ubuntu2604
-      - gnome-next-meeting-freebsd-pkg
-      - bundle-deb-trixie
-      - bundle-deb-ubuntu2604
-      - bundle-freebsd-pkg
+      - build-deb-trixie
+      - build-deb-ubuntu2604
+      - build-freebsd-pkg
     environment:
       GH_TOKEN:
         from_secret: github_token

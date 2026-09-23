@@ -4,10 +4,7 @@
 #include <libecal/libecal.h>
 #include <libedataserver/libedataserver.h>
 
-typedef struct {
-    time_t now;
-    time_t next;
-} FindNextData;
+#include "next_meeting.h"
 
 
 /*
@@ -22,7 +19,7 @@ instance_cb(ICalComponent *component,
             GCancellable *cancellable,
             GError **error)
 {
-    FindNextData *data = user_data;
+    NextMeeting *nm = user_data;
 
     (void)component;
     (void)instance_end;
@@ -33,24 +30,20 @@ instance_cb(ICalComponent *component,
      * All-day events have no time-of-day component, so a HH:MM
      * countdown does not apply to them, and a DATE-only ICalTime
      * does not carry a reliable timezone for conversion to time_t.
-     * Skip them entirely.
+     * Let nm_consider() ignore them; do not convert their start.
      */
-    if (i_cal_time_is_date(instance_start)) {
-        return TRUE;
+    gboolean is_date = i_cal_time_is_date(instance_start);
+
+    time_t start = 0;
+
+    if (!is_date) {
+        start =
+            i_cal_time_as_timet_with_zone(
+                instance_start,
+                i_cal_time_get_timezone(instance_start));
     }
 
-    time_t start =
-        i_cal_time_as_timet_with_zone(
-            instance_start,
-            i_cal_time_get_timezone(instance_start));
-
-    /*
-     * We only want meetings which have not started yet.
-     */
-    if (start > data->now &&
-        (data->next == (time_t)-1 || start < data->next)) {
-        data->next = start;
-    }
+    nm_consider(nm, is_date, start);
 
     return TRUE;
 }
@@ -118,10 +111,8 @@ main(void)
             registry,
             E_SOURCE_EXTENSION_CALENDAR);
 
-    FindNextData data = {
-        .now = now,
-        .next = (time_t)-1
-    };
+    NextMeeting nm;
+    nm_init(&nm, now);
 
     /*
      * Process every calendar.
@@ -168,7 +159,7 @@ main(void)
             day_end,
             NULL,
             instance_cb,
-            &data);
+            &nm);
 
         g_object_unref(client);
     }
@@ -176,23 +167,11 @@ main(void)
     g_list_free_full(sources, g_object_unref);
     g_object_unref(registry);
 
-    /*
-     * Nothing later today.
-     */
-    if (data.next == (time_t)-1) {
-        printf("----\n");
-        return 0;
-    }
+    gchar *out = nm_format(&nm);
 
-    /*
-     * Calculate remaining time.
-     */
-    time_t remaining = data.next - now;
+    printf("%s\n", out);
 
-    long hours = remaining / 3600;
-    long minutes = (remaining % 3600) / 60;
-
-    printf("%02ld:%02ld\n", hours, minutes);
+    g_free(out);
 
     return 0;
 }

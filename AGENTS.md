@@ -109,19 +109,27 @@ collection-wide: a single date-based tag (e.g. `v2026.09.22`) triggers
 program's packages at their current versions, plus one additional "bundle"
 package per target (Debian trixie, Ubuntu LTS, FreeBSD) containing every
 program together - not just a metapackage depending on the others, an
-actual combined package. Individual and bundle packages are built with the
-generic scripts in `scripts/` (`build-deb.sh`, `build-freebsd-pkg.py`,
-`merge-stage-roots.sh`) rather than a language-specific tool like `cargo-deb`,
-since packages here can come from any language.
+actual combined package.
+
+The pipeline has exactly one build step per target platform (not per
+program): each sets up its target's environment once, then builds every
+program and the bundle. A program opts into a target by providing a
+`ci-deb.sh` (and/or `ci-freebsd.sh`) of its own; the target orchestrators
+under `scripts/` discover programs by those files, so adding a program needs
+no change to the pipeline's step list. Individual and bundle packages are
+built with the generic scripts in `scripts/` (`build-deb.sh`,
+`build-freebsd-pkg.py`, `merge-stage-roots.sh`) rather than a
+language-specific tool like `cargo-deb`, since packages here can come from
+any language.
 
 FreeBSD packaging never uses a real FreeBSD host: the base system comes from
 selectively extracting the official `base.txz` release set, and each
 program's own native dependency closure is resolved live against the real
 FreeBSD package repository (`scripts/fetch-freebsd-deps.py`). That live
-repository layout is not a stable public interface, so every FreeBSD
-packaging step is best-effort (`failure: ignore` in CI) - a break there never
-blocks the Linux releases. See `NOTES.md` for the low-level detail (sysroot
-gotchas, adding a new program's release steps, etc.).
+repository layout is not a stable public interface, so the FreeBSD step is
+best-effort (`failure: ignore` in CI) - a break there never blocks the Linux
+releases. See `NOTES.md` for the low-level detail (sysroot gotchas, adding a
+new program, the shared-CI-workspace constraints, etc.).
 
 ## Conventions
 

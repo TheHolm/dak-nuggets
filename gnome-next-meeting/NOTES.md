@@ -17,6 +17,23 @@ there is none. Intended to be run by DAK via `text_exec`.
 - Builds with Meson; the directory `Makefile` is a thin wrapper so the root
   orchestrator's `make build`/`install`/`test`/`clean` work unchanged.
 
+## Test layout
+
+The decision/formatting logic lives in `next_meeting.c` / `next_meeting.h`
+(the `NextMeeting` state, `nm_consider()`, `nm_format()`), deliberately split
+out from `main.c` so it can be tested with plain `time_t` values and no
+Evolution Data Server, D-Bus session, or `ICalTime` objects. `main.c` keeps
+only the EDS glue (registry, calendars, `i_cal_time_*` conversion) and the
+`instance_cb` adapter that translates an `ICalTime` instance into a call to
+`nm_consider()`.
+
+`test_next_meeting.c` uses GLib's `GTest` framework and covers: the `----`
+marker, future-meeting formatting, sub-minute truncation, ignoring
+already-started meetings, ignoring all-day events, nearest-wins ordering
+(including that a later meeting does not displace a nearer one already
+found), multi-hour zero-padding, and re-init clearing state. Run them with
+`make test` (or `meson test -C build`).
+
 ## Behaviour / quirks
 
 - Only events starting **later today** are considered (`start > now`), and the
@@ -69,10 +86,10 @@ test interactively on a machine with a running desktop session instead.
 
 ## Known gaps
 
-- No automated tests yet. The logic is a single `main` with one static
-  callback, so meaningful coverage would require faking EDS sources. If this
-  gets refactored into testable units, add tests per the repo convention.
-- No test target in `meson.build`; `meson test` succeeds with zero tests.
-- Only manually verified against the empty-calendar path (see above); the
-  event-detection/instance-expansion logic itself has not been exercised
-  against a real event.
+- The unit tests cover the pure decision/formatting logic (`next_meeting.c`)
+  only. The EDS glue in `main.c` (registry connection, calendar enumeration,
+  `i_cal_time_*` conversion, the `instance_cb` adapter) is not covered by
+  automated tests, since exercising it needs a live EDS session.
+- Only the empty-calendar path has been manually verified end to end (see
+  above); the event-instance/expansion path has not been exercised against a
+  real `VEVENT`.

@@ -52,8 +52,15 @@ The `Makefile` in this directory wraps Meson so the root `make` targets work.
 
 ## Test
 
-There are currently no automated tests; see `NOTES.md`. Run the binary
-directly against a live EDS session to verify output:
+Run the unit tests (the decision/formatting logic in `next_meeting.c`, no
+live EDS needed):
+
+```
+make test
+```
+
+To verify the full behaviour against a real calendar, run the binary directly
+against a live EDS session (see `NOTES.md`):
 
 ```
 ./build/gnome-next-meeting
