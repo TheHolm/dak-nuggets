@@ -12,6 +12,26 @@ Prints the time remaining until the next calendar event of the day, in
 Times are computed in the system timezone. Recurring events are expanded so
 recurrences are counted.
 
+## Decoration
+
+The output can be wrapped with text supplied on the command line:
+
+- `--before TEXT` (`-b`) — printed before the time
+- `--after TEXT` (`-a`) — printed after the time
+
+Within `TEXT`, the escapes `\n`, `\t` and `\\` are expanded to a newline, a
+tab and a literal backslash, so newlines can be embedded. The decoration
+applies to the `----` marker as well. `--help` prints the usage summary.
+
+```
+$ gnome-next-meeting --before 'Starts in ' --after ' minutes'
+Starts in 00:30 minutes
+
+$ gnome-next-meeting --before 'Next:\n' --after '\n'
+Next:
+00:30
+```
+
 ## DAK integration
 
 The output is plain text, so it fits DAK's `text_exec` setup type directly.
