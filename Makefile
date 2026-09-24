@@ -12,13 +12,15 @@ PROGRAMS = gnome-next-meeting
 PREFIX  ?= /usr/local
 DESTDIR ?=
 
-.PHONY: all build test install clean $(PROGRAMS)
+.PHONY: all build test coverage install clean $(PROGRAMS)
 
 all: build
 
 build: $(PROGRAMS)
 
 test: $(PROGRAMS:%=%.test)
+
+coverage: $(PROGRAMS:%=%.coverage)
 
 install: $(PROGRAMS:%=%.install)
 
@@ -27,14 +29,17 @@ clean: $(PROGRAMS:%=%.clean)
 # --- per-program dispatch -------------------------------------------------
 #
 # Each program directory contains a Makefile exposing the standard targets
-# (build, test, install, clean). The root Makefile forwards the request,
-# passing PREFIX/DESTDIR through to install.
+# (build, test, coverage, install, clean). The root Makefile forwards the
+# request, passing PREFIX/DESTDIR through to install.
 
 $(PROGRAMS):
 	+$(MAKE) -C $@ build PREFIX=$(PREFIX)
 
 $(PROGRAMS:%=%.test):
 	+$(MAKE) -C $(@:%.test=%) test PREFIX=$(PREFIX)
+
+$(PROGRAMS:%=%.coverage):
+	+$(MAKE) -C $(@:%.coverage=%) coverage
 
 $(PROGRAMS:%=%.install):
 	+$(MAKE) -C $(@:%.install=%) install PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)

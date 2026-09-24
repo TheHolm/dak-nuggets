@@ -46,6 +46,7 @@ a thin POSIX-compatible orchestrator:
 ```
 make build     # build every helper
 make test      # run every helper's tests
+make coverage  # test coverage report for every helper (needs gcovr)
 make install   # install every helper (PREFIX/DESTDIR honoured)
 make clean     # clean build artifacts
 ```
