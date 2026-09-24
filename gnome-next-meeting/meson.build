@@ -1,5 +1,5 @@
 project('gnome-next-meeting', 'c',
-  version: '0.2.0',
+  version: '0.3.0',
   license: 'AGPL-3.0-or-later',
   default_options: ['c_std=c99', 'warning_level=2'])
 
@@ -17,6 +17,9 @@ executable('gnome-next-meeting',
   'main.c',
   link_with: next_meeting,
   dependencies: [glib_dep, eds_dep, ecal_dep],
+  # The version reaches --help from the project version above, so the two can
+  # never disagree and the CI packaging scripts keep a single source of truth.
+  c_args: ['-DGNM_VERSION="' + meson.project_version() + '"'],
   install: true)
 
 test_next_meeting = executable('test-next-meeting',

@@ -6,6 +6,43 @@
 
 #include "next_meeting.h"
 
+/*
+ * Version of the program, injected by Meson from the project version so the
+ * help text cannot drift from the packaged version.
+ */
+#ifndef GNM_VERSION
+#define GNM_VERSION "unknown"
+#endif
+
+
+/*
+ * Builds the string identifying which occurrence of a meeting an instance
+ * is. A component carrying an explicit RECURRENCE-ID uses it; otherwise the
+ * instance's own start time serves, so every expanded occurrence of a
+ * recurring meeting gets its own stable identity.
+ */
+static gchar *
+occurrence_id(ICalComponent *component, ICalTime *instance_start)
+{
+    ICalTime *recurrence_id = i_cal_component_get_recurrenceid(component);
+
+    gchar *id = NULL;
+
+    if (recurrence_id != NULL) {
+        if (!i_cal_time_is_null_time(recurrence_id)) {
+            id = i_cal_time_as_ical_string(recurrence_id);
+        }
+
+        g_object_unref(recurrence_id);
+    }
+
+    if (id == NULL) {
+        id = i_cal_time_as_ical_string(instance_start);
+    }
+
+    return id;
+}
+
 
 /*
  * Called once for every calendar event instance in the requested
@@ -21,8 +58,6 @@ instance_cb(ICalComponent *component,
 {
     NextMeeting *nm = user_data;
 
-    (void)component;
-    (void)instance_end;
     (void)cancellable;
     (void)error;
 
@@ -30,20 +65,45 @@ instance_cb(ICalComponent *component,
      * All-day events have no time-of-day component, so a HH:MM
      * countdown does not apply to them, and a DATE-only ICalTime
      * does not carry a reliable timezone for conversion to time_t.
-     * Let nm_consider() ignore them; do not convert their start.
+     * Let nm_consider() ignore them; do not convert their times.
      */
     gboolean is_date = i_cal_time_is_date(instance_start);
 
     time_t start = 0;
+    time_t end = 0;
+    guint32 key = 0;
 
     if (!is_date) {
         start =
             i_cal_time_as_timet_with_zone(
                 instance_start,
                 i_cal_time_get_timezone(instance_start));
+
+        /*
+         * A missing end is treated as a zero-length meeting, which drops out
+         * of the output as soon as it starts.
+         */
+        end = start;
+
+        if (instance_end != NULL && !i_cal_time_is_null_time(instance_end)) {
+            end =
+                i_cal_time_as_timet_with_zone(
+                    instance_end,
+                    i_cal_time_get_timezone(instance_end));
+        }
+
+        /*
+         * Identify the occurrence so that countdowns falling at the very
+         * same second keep a stable order between runs.
+         */
+        g_autofree gchar *id = occurrence_id(component, instance_start);
+
+        key = nm_key(i_cal_component_get_uid(component),
+                     id,
+                     i_cal_component_get_summary(component));
     }
 
-    nm_consider(nm, is_date, start);
+    nm_consider(nm, is_date, start, end, key);
 
     return TRUE;
 }
@@ -55,27 +115,42 @@ main(int argc, char *argv[])
     GError *error = NULL;
 
     /*
-     * Optional text wrapped around the countdown. Escapes such as "\n" are
+     * Optional text wrapped around the countdowns. Escapes such as "\n" are
      * expanded by nm_decorate().
      */
     g_autofree gchar *before = NULL;
     g_autofree gchar *after = NULL;
 
+    gint lines = NM_DEFAULT_LINES;
+
     GOptionEntry options[] = {
         {
             "before", 'b', 0, G_OPTION_ARG_STRING, &before,
-            "text to print before the time (\\n, \\t and \\\\ are expanded)",
+            "text to print before the times (\\n, \\t and \\\\ are expanded)",
             "TEXT"
         },
         {
             "after", 'a', 0, G_OPTION_ARG_STRING, &after,
-            "text to print after the time (\\n, \\t and \\\\ are expanded)",
+            "text to print after the times (\\n, \\t and \\\\ are expanded)",
             "TEXT"
+        },
+        {
+            "lines", 'l', 0, G_OPTION_ARG_INT, &lines,
+            "maximum number of countdown lines to print (default 3)",
+            "N"
         },
         { NULL }
     };
 
     GOptionContext *context = g_option_context_new(NULL);
+
+    /*
+     * The summary is printed above the option list by --help, and carries the
+     * program version.
+     */
+    g_autofree gchar *summary = nm_help_summary(GNM_VERSION);
+
+    g_option_context_set_summary(context, summary);
 
     g_option_context_add_main_entries(context, options, NULL);
 
@@ -92,6 +167,11 @@ main(int argc, char *argv[])
     }
 
     g_option_context_free(context);
+
+    if (lines < 1) {
+        fprintf(stderr, "--lines must be at least 1\n");
+        return 1;
+    }
 
     /*
      * Current time.
@@ -121,6 +201,15 @@ main(int argc, char *argv[])
 
     ICalTime *tomorrow_start = i_cal_time_clone(today_start);
     i_cal_time_adjust(tomorrow_start, 1, 0, 0, 0);
+
+    /*
+     * The query starts at midnight rather than now, because a meeting which
+     * is already under way still has a countdown to its end; EDS returns
+     * every instance overlapping the range, so those are included.
+     * nm_consider() drops the ones which have already finished.
+     */
+    time_t day_start =
+        i_cal_time_as_timet_with_zone(today_start, timezone);
 
     time_t day_end =
         i_cal_time_as_timet_with_zone(tomorrow_start, timezone);
@@ -194,7 +283,7 @@ main(int argc, char *argv[])
          */
         e_cal_client_generate_instances_sync(
             cal_client,
-            now,
+            day_start,
             day_end,
             NULL,
             instance_cb,
@@ -206,11 +295,13 @@ main(int argc, char *argv[])
     g_list_free_full(sources, g_object_unref);
     g_object_unref(registry);
 
-    gchar *out = nm_decorate(&nm, before, after);
+    gchar *out = nm_decorate(&nm, (guint)lines, before, after);
 
     printf("%s\n", out);
 
     g_free(out);
+
+    nm_clear(&nm);
 
     return 0;
 }

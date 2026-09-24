@@ -16,6 +16,22 @@ parses this structure to build each GitHub Release's body, printing from a
 No releases yet - this file gains its first `## vYYYY.MM.DD` entry when the
 first collection-wide tag is cut.
 
+## v2026.09.24 — gnome-next-meeting 0.3.0
+
+### User-facing changes
+- `gnome-next-meeting` 0.3.0: instead of a single countdown to the next
+  meeting, every remaining meeting of the day now gets its own line, soonest
+  first — a leading space counts down to a meeting's start, a leading `-`
+  counts down to the end of the meeting you are in right now, which the
+  program could not report at all before. Overlapping meetings each keep their
+  own line, a meeting running past midnight keeps counting down to its end,
+  the same meeting subscribed in two calendars is shown once, the new
+  `--lines N` option caps how many lines are printed (default 3, matching a DAK
+  button LCD), and `--help` now shows the program version.
+
+### Details
+- See `gnome-next-meeting/RELEASE_NOTES.md`.
+
 ## v2026.09.23.1 — gnome-next-meeting 0.2.0
 
 ### User-facing changes
