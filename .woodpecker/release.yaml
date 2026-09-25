@@ -42,6 +42,17 @@
 #     read/write, restricted to the "tag" event.
 #   - The repo's push mirror to GitHub is set up and syncs tags promptly, so
 #     the tag this workflow is releasing already exists on GitHub.
+#
+# Every step starts by chmod'ing the scripts it is about to run: this pipeline
+# deliberately does not trust the checked-out file modes. A clone can arrive
+# with the executable bit stripped (a mirror or rsync that doesn't preserve
+# modes, a Windows-hosted working copy, or simply a bad commit), and without
+# this the whole release fails with a bare "Permission denied" - for a reason
+# that has nothing to do with the release. The chmod fixes the bit on disk in
+# the shared workspace, so the nested calls inside scripts/ and
+# <program>/ci-*.sh are covered too, not just the invocations in this file.
+# Don't remove it as redundant just because the modes happen to be right in
+# git today - see NOTES.md.
 
 when:
   - event: tag
@@ -56,6 +67,8 @@ steps:
       # "Adding a new program's release steps" checklist in NOTES.md.
       DEB_DEPENDS: "libecal-2.0-3, libedataserver-1.2-27t64"
     commands:
+      # File modes are not trusted - see the note in this file's header.
+      - chmod +x scripts/*.sh */ci-*.sh
       # Union of every program's build dependencies for this target.
       - apt-get update && apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libglib2.0-dev libecal2.0-dev libedataserver1.2-dev dpkg-dev
       - ./scripts/build-target-debs.sh "1~trixie" amd64 trixie
@@ -72,6 +85,8 @@ steps:
       # ubuntu:26.04 container and update if it differs. See NOTES.md.
       DEB_DEPENDS: "libecal-2.0-3, libedataserver-1.2-27t64"
     commands:
+      # File modes are not trusted - see the note in this file's header.
+      - chmod +x scripts/*.sh */ci-*.sh
       - apt-get update && apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libglib2.0-dev libecal2.0-dev libedataserver1.2-dev dpkg-dev
       - ./scripts/build-target-debs.sh "1~ubuntu2604" amd64 ubuntu2604
 
@@ -88,6 +103,8 @@ steps:
       PKG_CONFIG_SYSROOT_DIR: /opt/freebsd-sysroot
       PKG_CONFIG_LIBDIR: /opt/freebsd-sysroot/usr/local/libdata/pkgconfig:/opt/freebsd-sysroot/usr/local/lib/pkgconfig
     commands:
+      # File modes are not trusted - see the note in this file's header.
+      - chmod +x scripts/*.sh */ci-*.sh
       # Union of every program's build dependencies for this target.
       - apt-get update && apt-get install -y --no-install-recommends clang lld binutils zstd xz-utils python3 meson ninja-build pkg-config curl ca-certificates
       - mkdir -p /opt/freebsd-sysroot
@@ -150,6 +167,10 @@ steps:
       GH_TOKEN:
         from_secret: github_token
     commands:
+      # File modes are not trusted - see the note in this file's header. This
+      # step runs no <program>/ci-*.sh, so the glob stays narrow: under /bin/sh
+      # an unmatched glob would be passed through literally and fail the step.
+      - chmod +x scripts/*.sh
       - apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg
       - mkdir -p -m 755 /etc/apt/keyrings
       - curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg

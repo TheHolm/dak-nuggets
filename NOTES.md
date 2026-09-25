@@ -45,6 +45,40 @@ one step's Meson data in the shared `gnome-next-meeting/build/` made the
 other fail with `Build data file ... references functions or classes that
 don't exist ... generated with an old version of meson`.
 
+## CI does not trust the checked-out file modes
+
+Every CI step begins with a `chmod +x` of the scripts it is about to run
+(`scripts/*.sh`, plus `*/ci-*.sh` in the steps that build programs). This is
+deliberate and must not be tidied away on the grounds that the modes are
+correct in git today.
+
+The pipeline invokes shell scripts as `./scripts/foo.sh`, which needs the
+executable bit, and that bit is easy to lose without anyone noticing: a mirror
+or `rsync` that doesn't preserve modes, a working copy hosted on a filesystem
+without POSIX permissions, or simply a commit made from such a checkout. The
+failure mode is a bare `Permission denied` and exit 126, far away from anything
+resembling its cause - and on a *tag* build, i.e. exactly when a release is
+being cut.
+
+`chmod` fixes the bit on disk in the shared workspace, so it covers not just
+the invocations in the workflow files but also the nested ones inside the
+scripts themselves - `build-target-debs.sh` running each `<program>/ci-deb.sh`,
+and both target orchestrators running `merge-stage-roots.sh` and
+`build-deb.sh`. The Python scripts (`fetch-freebsd-deps.py`,
+`build-freebsd-pkg.py`) are always invoked through `python3` and so were never
+affected.
+
+Two details worth keeping:
+
+- The steps that run no program scripts (`publish-github-release`, and the
+  freshness check) use the narrow `chmod +x scripts/*.sh`. Woodpecker runs
+  commands through `/bin/sh` (dash in these images), where an unmatched glob is
+  passed through literally, so a `*/ci-*.sh` that matched nothing would fail
+  the step for no reason.
+- No separate "fix permissions" step: the three build steps are `depends_on: []`
+  precisely so they run concurrently, and a shared prerequisite step would
+  serialise them to save a millisecond of `chmod`.
+
 ## Packaging scripts (`scripts/`)
 
 Generic, language-agnostic tooling:

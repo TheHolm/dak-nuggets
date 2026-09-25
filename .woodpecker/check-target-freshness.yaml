@@ -20,5 +20,10 @@ steps:
   - name: check
     image: debian:trixie-slim
     commands:
+      # The checked-out file modes are not trusted: a clone can arrive with the
+      # executable bit stripped (mirror/rsync, Windows-hosted working copy, or a
+      # bad commit), which would fail this job with a bare "Permission denied".
+      # See .woodpecker/release.yaml's header note and NOTES.md.
+      - chmod +x scripts/*.sh
       - apt-get update && apt-get install -y --no-install-recommends curl ca-certificates
       - ./scripts/check-target-freshness.sh
