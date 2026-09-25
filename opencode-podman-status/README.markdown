@@ -42,7 +42,8 @@ wait       # run | wait | done | ----
 ```
 
 A container that exists but cannot be reached shows `----` and `--:--`, keeping
-the misconfiguration visible. A slot that **does not exist prints nothing at
+the misconfiguration visible. By far the most common cause is opencode having
+been started without `--port`; `--list` says so explicitly. A slot that **does not exist prints nothing at
 all**, so unused DAK buttons stay blank.
 
 Slots are numbered from 1 by container creation time, oldest first. That is
@@ -107,7 +108,7 @@ discovered port and any failure reason:
 ```
 $ opencode-podman-status --list
  1  opencode-web             run      00:03  pid=41233    port=4096
- 2  opencode-api             unknown  --:--  pid=41890    port=-      no listening socket (is opencode running with --port?)
+ 2  opencode-api             unknown  --:--  pid=41890    port=-      opencode is running without --port, so it has no API socket
 ```
 
 ## DAK integration
@@ -162,9 +163,14 @@ This is the same mechanism `podman unshare` and `nsenter -U -n -t` use — no ro
 no setuid, no file capabilities.
 
 A container's namespaces are identified by reading `/proc/<pid>/ns/{user,net}`,
-never by reasoning about podman's network topology. The listening port is
-likewise discovered by reading the container's own `/proc/net/tcp`, so nothing
-depends on a port convention.
+never by reasoning about podman's network topology.
+
+The port is found by **socket ownership**, never by trying ports. Inside the
+container, the helper looks for processes named `opencode`, collects the socket
+inodes they hold from `/proc/<pid>/fd`, and keeps only the listening sockets in
+the container's `/proc/net/tcp` with a matching inode. So nothing depends on a
+port convention, and **other servers in the same container are never
+contacted** — not even to ask whether they are opencode.
 
 Three GETs per container — `/session/status`, `/question` and `/permission` —
 determine the state. Only `--instance` pays for the extra request needed to work

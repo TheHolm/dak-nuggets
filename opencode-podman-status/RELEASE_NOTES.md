@@ -1,6 +1,6 @@
 # Release notes — opencode-podman-status
 
-## 0.1.0
+## v0.1.0
 
 First release.
 
@@ -35,8 +35,16 @@ container's namespaces, and rootless podman does not exist on FreeBSD.
   so the `server` block is inert for it — documented behaviour, since the schema
   scopes that block to `serve` and `web`.
 - **Namespace identity is read, not inferred.** `/proc/<pid>/ns/{user,net}` is
-  authoritative; nothing reasons about podman's network topology. The listening port
-  comes from the container's own `/proc/net/tcp`, so no port convention is assumed.
+  authoritative; nothing reasons about podman's network topology.
+- **opencode's port is found by socket ownership, never by trying ports.** Inside
+  the container the probe finds the processes named `opencode`, collects the socket
+  inodes they hold from `/proc/<pid>/fd`, and keeps only listeners in the container's
+  `/proc/net/tcp` with a matching inode. Other servers sharing the container are
+  never contacted. A pre-release build sent a health check to every listening port
+  instead, so neighbouring servers logged errors about requests they never asked
+  for - found in first real use, and covered now by a regression test with a decoy
+  server. It also lets the probe say precisely *why* a container is unreachable:
+  opencode not running, or running without `--port`.
 - **Three GETs per container** — `/session/status`, `/question`, `/permission`.
   `/session/status` omits idle sessions (verified with idle sessions present), so an
   empty map means nothing is working. Subagents are deliberately not filtered out:
@@ -67,6 +75,7 @@ container's namespaces, and rootless podman does not exist on FreeBSD.
   A password was rejected deliberately: opencode reads it only from the environment,
   and everything it spawns inherits that environment, so it would be readable by
   the in-container code it would defend against.
-- 106 unit tests, plus an opt-in `tests/namespace-entry.sh` covering namespace entry
-  against a fake opencode in a nested user namespace. That one is kept out of
+- 113 unit tests, plus an opt-in `tests/namespace-entry.sh` covering namespace entry
+  against a fake opencode in a nested user namespace, next to a decoy server that
+  must receive no requests. That one is kept out of
   `make test` because creating a nested user namespace is commonly forbidden in CI.

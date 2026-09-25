@@ -5,9 +5,9 @@
 //! point `127.0.0.1` is the container's loopback, so opencode's server is
 //! reachable exactly as it would be from inside the container.
 //!
-//! The child finds the listening port from `/proc/net/tcp` (its own, which is now
-//! the container's), queries opencode, and writes a single JSON line to stdout for
-//! the parent to collect.
+//! The child finds the port opencode itself is listening on - by socket
+//! ownership, never by trying ports, see [`crate::sockets`] - queries opencode,
+//! and writes a single JSON line to stdout for the parent to collect.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -15,10 +15,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::http;
+use crate::sockets::{self, Discovery};
 use crate::status::{Observation, State};
-
-/// `/proc/net/tcp` state value for a listening socket.
-const TCP_LISTEN: &str = "0A";
 
 /// Most busy sessions to interrogate for a turn start time.
 ///
@@ -59,62 +57,6 @@ impl Report {
             Some("done") => Some(State::Done),
             _ => None,
         }
-    }
-}
-
-/// Extracts ports of listening sockets bound to loopback or the wildcard address.
-///
-/// Takes the contents of a `/proc/net/tcp`-format table so it can be tested
-/// against captured fixtures. Both the loopback and wildcard cases are accepted:
-/// opencode binds `127.0.0.1` by default, but someone may have passed
-/// `--hostname 0.0.0.0`, and from inside the namespace `127.0.0.1` reaches both.
-///
-/// Addresses are little-endian hex in this file, so `127.0.0.1` appears as
-/// `0100007F`.
-pub fn listening_ports(table: &str) -> Vec<u16> {
-    let mut ports = Vec::new();
-    for line in table.lines().skip(1) {
-        let mut fields = line.split_whitespace();
-        let _index = fields.next();
-        let local = match fields.next() {
-            Some(l) => l,
-            None => continue,
-        };
-        let _remote = fields.next();
-        if fields.next() != Some(TCP_LISTEN) {
-            continue;
-        }
-
-        let (addr, port) = match local.split_once(':') {
-            Some(parts) => parts,
-            None => continue,
-        };
-        if !is_local_address(addr) {
-            continue;
-        }
-        if let Ok(port) = u16::from_str_radix(port, 16) {
-            if port != 0 && !ports.contains(&port) {
-                ports.push(port);
-            }
-        }
-    }
-    ports
-}
-
-/// True if a `/proc/net/tcp` local address is loopback or the wildcard.
-///
-/// Handles both the 8-character IPv4 form and the 32-character IPv6 form.
-fn is_local_address(addr: &str) -> bool {
-    // Wildcard: every bit zero, in either address family.
-    if !addr.is_empty() && addr.bytes().all(|b| b == b'0') {
-        return true;
-    }
-    match addr.len() {
-        // IPv4, little-endian: 127.0.0.1.
-        8 => addr.eq_ignore_ascii_case("0100007F"),
-        // IPv6 ::1, as four little-endian words.
-        32 => addr.eq_ignore_ascii_case("00000000000000000000000001000000"),
-        _ => false,
     }
 }
 
@@ -173,25 +115,25 @@ impl MessageEntry {
     }
 }
 
-/// Runs the probe against `port`, or discovers the port if `port` is `None`.
+/// Runs the probe against `port`, or finds opencode's own port if `port` is `None`.
 ///
 /// Always returns a [`Report`]: failures are reported, not raised, because the
 /// parent needs to render something for every container.
+///
+/// Without an explicit port, only ports held by an opencode process are ever
+/// connected to. Other servers in the container are never contacted - an earlier
+/// version sent each of them a health check and they logged errors about it.
 pub fn run(port: Option<u16>, timeout: Duration, now_ms: i64) -> Report {
     let candidates = match port {
         Some(p) => vec![p],
-        None => match std::fs::read_to_string("/proc/net/tcp") {
-            Ok(table) => listening_ports(&table),
-            Err(e) => return Report::failed(format!("cannot read /proc/net/tcp: {e}")),
+        None => match sockets::discover() {
+            Discovery::Found(ports) => ports,
+            other => return Report::failed(other.reason()),
         },
     };
 
-    if candidates.is_empty() {
-        return Report::failed("no listening socket (is opencode running with --port?)");
-    }
-
-    // With several candidates, ask each whether it is actually opencode. A
-    // container may have unrelated services on loopback.
+    // Normally exactly one. Several means opencode holds more than one listener,
+    // all of them its own, so asking each is safe.
     let mut last_error = None;
     for candidate in candidates {
         match probe_one(candidate, timeout, now_ms) {
@@ -199,15 +141,13 @@ pub fn run(port: Option<u16>, timeout: Duration, now_ms: i64) -> Report {
             Err(e) => last_error = Some(e),
         }
     }
-    Report::failed(
-        last_error.unwrap_or_else(|| "no opencode server on any listening port".to_string()),
-    )
+    Report::failed(last_error.unwrap_or_else(|| "opencode did not answer".to_string()))
 }
 
 /// Queries one candidate port, confirming it is opencode before trusting it.
 fn probe_one(port: u16, timeout: Duration, now_ms: i64) -> Result<Report, String> {
-    // /global/health is the cheapest way to establish this is opencode and not
-    // some other service that happens to share the namespace.
+    // A cheap liveness check before the real requests. The port is already known
+    // to be opencode's, so this only guards against it still starting up.
     http::get(port, "/global/health", timeout).map_err(|e| format!("port {port}: {e}"))?;
 
     let statuses: HashMap<String, crate::status::SessionStatus> =
@@ -310,80 +250,6 @@ fn plausible_past(ms: i64, now_ms: i64) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A real `/proc/net/tcp` captured while opencode listened on port 4098
-    /// (`0x1002`), alongside an established outbound connection. The addresses of
-    /// that connection have been replaced with RFC 5737 documentation addresses;
-    /// nothing in the parser depends on their value.
-    const REAL_TABLE: &str = "\
-  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
-   0: 0100007F:1002 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 257009 1 0000000078043ef6 20 4 26 4 2
-   1: 010002C0:E5DE 026433C6:01BB 01 00000000:00000000 00:00000000 00000000     0        0 227599 1 00000000efef65ae 20 4 0 4 2
-";
-
-    /// The real table yields exactly the listening port, ignoring the
-    /// established connection.
-    #[test]
-    fn finds_listening_port_in_real_table() {
-        assert_eq!(listening_ports(REAL_TABLE), vec![0x1002]);
-    }
-
-    /// A table with no listening socket - the state this container was in before
-    /// opencode was given `--port` - yields nothing.
-    #[test]
-    fn finds_nothing_when_only_established_connections() {
-        let table = "\
-  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
-   0: 010002C0:E5DE 026433C6:01BB 01 00000000:00000000 00:00000000 00000000     0        0 227599 1 0 20 4 26 4 2
-";
-        assert!(listening_ports(table).is_empty());
-    }
-
-    /// A wildcard bind, as `--hostname 0.0.0.0` would produce, is accepted.
-    #[test]
-    fn accepts_wildcard_bind() {
-        let table = "header\n   0: 00000000:1000 00000000:0000 0A 0 0 0 0 0 0 0 0\n";
-        assert_eq!(listening_ports(table), vec![4096]);
-    }
-
-    /// An IPv6 loopback or wildcard listener is accepted too.
-    #[test]
-    fn accepts_ipv6_loopback_and_wildcard() {
-        let v6_loopback =
-            "header\n   0: 00000000000000000000000001000000:1000 00000000000000000000000000000000:0000 0A 0 0 0 0 0 0 0 0\n";
-        assert_eq!(listening_ports(v6_loopback), vec![4096]);
-        let v6_wildcard =
-            "header\n   0: 00000000000000000000000000000000:1000 00000000000000000000000000000000:0000 0A 0 0 0 0 0 0 0 0\n";
-        assert_eq!(listening_ports(v6_wildcard), vec![4096]);
-    }
-
-    /// A listener on a routable address is not ours to talk to on loopback.
-    #[test]
-    fn ignores_non_local_listeners() {
-        let table = "header\n   0: 010002C0:1000 00000000:0000 0A 0 0 0 0 0 0 0 0\n";
-        assert!(listening_ports(table).is_empty());
-    }
-
-    /// Several listeners are all reported, in table order, without duplicates.
-    #[test]
-    fn reports_multiple_candidate_ports_once_each() {
-        let table = "header\n\
-   0: 0100007F:1000 00000000:0000 0A 0 0 0 0 0 0 0 0\n\
-   1: 0100007F:1F90 00000000:0000 0A 0 0 0 0 0 0 0 0\n\
-   2: 0100007F:1000 00000000:0000 0A 0 0 0 0 0 0 0 0\n";
-        assert_eq!(listening_ports(table), vec![4096, 8080]);
-    }
-
-    /// Truncated, empty and malformed tables are survived without panicking.
-    #[test]
-    fn survives_malformed_tables() {
-        assert!(listening_ports("").is_empty());
-        assert!(listening_ports("header only\n").is_empty());
-        assert!(listening_ports("header\n   0:\n").is_empty());
-        assert!(listening_ports("header\n   0: nocolon 00000000:0000 0A\n").is_empty());
-        assert!(listening_ports("header\n   0: 0100007F:ZZZZ 0:0 0A\n").is_empty());
-        assert!(listening_ports("header\n   0: 0100007F:0000 0:0 0A 0 0\n").is_empty());
-    }
 
     /// The real `{info, parts}` entry captured from opencode 1.18.32 for
     /// `GET /session/{id}/message?limit=1`, trimmed of the parts payload.

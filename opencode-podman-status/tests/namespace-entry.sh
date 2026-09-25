@@ -14,7 +14,11 @@
 #
 #   1. the server is NOT reachable from outside the namespace;
 #   2. `--pid` reaches it by entering the namespace, and reports the right state;
-#   3. the port is discovered from /proc rather than needing to be told.
+#   3. the port is discovered by socket ownership rather than needing to be told;
+#   4. a second, unrelated server in the same namespace is never contacted.
+#
+# Point 4 is a regression test: an earlier version tried every listening port,
+# so other servers in the container received requests and logged errors.
 #
 # The same shape as the manual validation recorded in NOTES.md, which additionally
 # confirmed this works as an unprivileged user (the case that matters for rootless
@@ -32,7 +36,7 @@ bin="$program_dir/target/debug/opencode-podman-status"
 
 work=$(mktemp -d)
 # shellcheck disable=SC2064  # expand $work now, not at trap time
-trap "rm -rf '$work'; [ -n \"\${server_pid:-}\" ] && kill \"\$server_pid\" 2>/dev/null" EXIT
+trap "rm -rf '$work'; [ -n \"\${server_pid:-}\" ] && pkill -P \"\$server_pid\" 2>/dev/null; [ -n \"\${server_pid:-}\" ] && kill \"\$server_pid\" 2>/dev/null" EXIT
 
 skip() {
     echo "SKIP: $*" >&2
@@ -49,6 +53,7 @@ command -v unshare >/dev/null 2>&1 || skip "unshare(1) not available"
 command -v python3 >/dev/null 2>&1 || skip "python3 not available"
 
 PORT=47311
+DECOY_PORT=47312
 
 # A fake opencode: enough of the API for the probe to classify it. Reports one
 # busy session and no pending requests, so the expected verdict is "run".
@@ -68,8 +73,19 @@ import struct
 import sys
 
 SIOCGIFFLAGS, SIOCSIFFLAGS, IFF_UP = 0x8913, 0x8914, 0x1
+PR_SET_NAME = 15
 PORT = int(sys.argv[1])
 STATE_DIR = sys.argv[2]
+DECOY_PORT = int(sys.argv[3])
+
+
+def become_opencode():
+    """Rename this process's comm to `opencode`, as the probe identifies opencode
+    by process name. Must run on the main thread, whose comm /proc reports."""
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(PR_SET_NAME, b"opencode", 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_NAME) failed")
 
 
 def bring_loopback_up():
@@ -117,8 +133,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
         """Silence the default stderr access log."""
 
 
+class Decoy(http.server.BaseHTTPRequestHandler):
+    """An unrelated server sharing the namespace. Records any request it gets;
+    the probe must never send it one."""
+
+    def do_GET(self):
+        with open(os.path.join(STATE_DIR, "decoy-hits"), "a") as fh:
+            fh.write(self.path + "\n")
+        self.send_error(404)
+
+    def log_message(self, *args):
+        """Silence the default stderr access log."""
+
+
 if __name__ == "__main__":
     bring_loopback_up()
+    # The decoy runs in a separate process forked *before* the rename, so it is
+    # neither named opencode nor holding opencode's sockets - just a neighbour.
+    # Renaming first would make the child inherit the name and genuinely look
+    # like opencode (a real child of opencode execs, which resets its name).
+    if os.fork() == 0:
+        decoy = http.server.HTTPServer(("127.0.0.1", DECOY_PORT), Decoy)
+        decoy.serve_forever()
+    become_opencode()
     server = http.server.HTTPServer(("127.0.0.1", PORT), Handler)
     with open(os.path.join(STATE_DIR, "pid"), "w") as fh:
         fh.write(str(os.getpid()))
@@ -129,7 +166,7 @@ PYTHON
 
 # The PID written from inside is globally visible: only the user and network
 # namespaces are unshared, not the PID namespace.
-unshare -Urn python3 "$work/fake_opencode.py" "$PORT" "$work" >"$work/server.log" 2>&1 &
+unshare -Urn python3 "$work/fake_opencode.py" "$PORT" "$work" "$DECOY_PORT" >"$work/server.log" 2>&1 &
 
 i=0
 while [ ! -f "$work/ready" ] && [ "$i" -lt 60 ]; do
@@ -164,12 +201,18 @@ echo "$out" | grep -q '"state":"run"' \
     || fail "expected state run with explicit port, got: $out"
 echo "ok: reached it via namespace entry, state=run"
 
-# 3. Namespace entry with port discovery from the container's own /proc.
+# 3. Namespace entry with the port found by socket ownership.
 out=$("$bin" --pid "$server_pid" 2>&1) || fail "--pid (auto port) exited non-zero: $out"
 echo "$out" | grep -q "\"port\":$PORT" \
     || fail "expected discovered port $PORT, got: $out"
 echo "$out" | grep -q '"state":"run"' \
     || fail "expected state run with discovered port, got: $out"
-echo "ok: discovered port $PORT from inside the namespace, state=run"
+echo "ok: found opencode's own port $PORT by socket ownership, state=run"
+
+# 4. The unrelated server must not have been contacted, by any of the above.
+if [ -s "$work/decoy-hits" ]; then
+    fail "the unrelated server was contacted: $(tr '\n' ' ' < "$work/decoy-hits")"
+fi
+echo "ok: the unrelated server in the same namespace received no requests"
 
 echo "PASS"

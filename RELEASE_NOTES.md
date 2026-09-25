@@ -20,6 +20,28 @@ parses this structure to build each GitHub Release's body, printing from a
 No releases yet - this file gains its first `## vYYYY.MM.DD` entry when the
 first collection-wide tag is cut.
 
+## v2026.09.25-1 — opencode-podman-status 0.1.0
+
+### User-facing changes
+- New program `opencode-podman-status` 0.1.0 (**Linux only**): reports what
+  each opencode instance running in a rootless podman container is doing, as
+  three lines for a DAK button — `run: 3`, `wait:1`, `done:5` — counting
+  instances that are working, waiting for an answer from you, and idle.
+  `--instance N` shows one container's name, state and time in that state
+  (printing nothing for a slot that does not exist), and `--list` explains any
+  container it cannot reach. Each container must run `opencode --port 4096`;
+  setting `server.port` in `opencode.json` does not work.
+
+### Details
+- Reaches each instance by entering its container's user and network
+  namespaces, so no ports are published and no privileges are needed beyond
+  being the user who started the containers. opencode's port is identified by
+  socket ownership, so other servers in the container are never contacted.
+- Not built for FreeBSD, where rootless podman does not exist; the top-level
+  README's new Platforms column records this.
+- `Cargo.lock` is now committed for Rust programs. See `NOTES.md` and
+  `opencode-podman-status/RELEASE_NOTES.md`.
+
 ## v2026.09.25 — gnome-next-meeting 0.3.1
 
 ### User-facing changes

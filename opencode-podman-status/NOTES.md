@@ -121,7 +121,8 @@ netns only, without joining userns:         EPERM
 ```
 
 `tests/namespace-entry.sh` reproduces the same shape through this program's own
-code (isolation, `--pid` entry, in-namespace port discovery). It is **not** part of
+code (isolation, `--pid` entry, port discovery by socket ownership, and a decoy
+server that must receive no requests). It is **not** part of
 `make test`: it needs to create a nested user namespace, which CI containers
 commonly forbid. It exits 2 to mean "skipped".
 
@@ -151,6 +152,58 @@ two processes share a namespace. If two containers report the same netns inode t
 are in a pod, which also means they would collide on the port.
 
 ---
+
+## 3a. Finding opencode's port: by socket ownership, never by trying ports
+
+**First real-use bug.** The pre-release probe, when not given `--port`, took every
+loopback/wildcard listener in the container's `/proc/net/tcp` and sent each a
+`GET /global/health` to see which one was opencode. The reporting user's containers
+run other servers next to opencode, and those servers logged errors about requests
+they never asked for. A monitor must not touch services it was not pointed at, so
+"try it and see" is out entirely - even a single request to the wrong server is the
+bug.
+
+Reproduced here with a decoy server that records every request: the old code sent
+it `/global/health` whenever opencode itself had no listener (i.e. was started
+without `--port`), because the decoy was then the only candidate.
+
+**Now** (`src/sockets.rs`): inside the container's namespaces,
+
+1. read listeners from `/proc/net/tcp` and `/proc/net/tcp6` - field 10 is the
+   socket **inode**;
+2. scan `/proc/*` for processes whose `/proc/<pid>/ns/net` equals our own (i.e.
+   are in this container - `/proc` is still the host's mount, so these are host
+   PIDs) and that are opencode: `comm == "opencode"` or `basename(argv[0]) ==
+   "opencode"`, both exact;
+3. collect their socket inodes from `/proc/<pid>/fd/*` (`socket:[N]` links);
+4. use only listeners whose inode is among them.
+
+Verified live: with opencode on 4099 and a decoy on 8765, the ownership scan maps
+4099 to the `opencode` process and 8765 to `python3`; the probe reports 4099 and the
+decoy receives nothing. With opencode running *without* `--port` it reports
+"opencode is running without --port, so it has no API socket" - and the decoy still
+receives nothing. That exact message is also what the reporting user's setup should
+now show, instead of silently counting nothing.
+
+Details that matter:
+
+- **Exact name match.** This program's own `comm` is `opencode-podman` (15-char
+  truncation of `opencode-podman-status`), so a prefix match would find itself.
+- **The listening socket is held by the main `opencode` process** (Bun's server
+  runs on a worker *thread*, and threads share the fd table), so no child-process
+  search is needed.
+- **Permission to read `/proc/<pid>/fd`** needs ptrace-read access. The probe child
+  has it twice over: same host UID as the container's root, and full capabilities
+  in the container's user namespace after `setns`.
+- **Three distinct outcomes** are reported: not running, running without `--port`,
+  and fds unreadable. "Not listening" is only claimed when the fds *were* readable,
+  otherwise it would be a guess.
+- An explicit `--port` still bypasses all of this and is connected to as given -
+  that is the user naming the port themselves.
+- `tests/namespace-entry.sh` now carries a regression test: the fake opencode renames
+  itself `opencode` via `prctl(PR_SET_NAME)`, and a decoy in a separate process
+  (forked *before* the rename, otherwise it inherits the name and genuinely looks
+  like opencode) must record zero requests.
 
 ## 4. opencode's ID format carries a timestamp
 
@@ -370,6 +423,9 @@ break that.
   inspection only (it uses just `?=`, `.PHONY`, backslash continuations and shell
   recipes, all of which both makes accept). Worth confirming both when a suitable
   environment is available.
+- **Never find a service by sending it a request.** See §3a: probing every
+  listener to see which one answers is how the first real-use bug happened. Identify
+  by ownership from `/proc`, then talk only to what was identified.
 - **Coverage is reported unfiltered** (`make coverage`), currently ~83% lines.
   The logic layer is essentially complete - `ident.rs` and `render.rs` at 100%,
   `status.rs` and `http.rs` at 99% - while `nsenter.rs` (73%), `probe.rs` (68%)

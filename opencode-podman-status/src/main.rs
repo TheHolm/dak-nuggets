@@ -8,6 +8,7 @@ mod ident;
 mod nsenter;
 mod probe;
 mod render;
+mod sockets;
 mod status;
 
 use std::process::ExitCode;
