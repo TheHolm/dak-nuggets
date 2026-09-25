@@ -1,0 +1,25 @@
+[package]
+name = "opencode-podman-status"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Reports the state of opencode instances running in rootless podman containers"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+# JSON parsing only. HTTP is hand-rolled in src/http.rs: every request is a
+# plain GET to a loopback address inside a container's network namespace, and
+# `Connection: close` lets us read to EOF, so chunked transfer-encoding and
+# Content-Length handling never come up. A full HTTP client crate would have
+# added eight transitive dependencies for that. JSON is a different matter -
+# a hand-rolled parser is where a silent correctness bug would hide, so this
+# one is worth the dependency.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# fork(2), setns(2), pidfd_open(2), waitpid(2). See src/nsenter.rs.
+libc = "0.2"
+
+[profile.release]
+strip = true

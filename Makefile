@@ -7,7 +7,9 @@
 # entry points via a per-program Makefile. The top-level targets simply
 # recurse into every program directory listed in PROGRAMS.
 
-PROGRAMS = gnome-next-meeting
+# opencode-podman-status is Linux-only; its own Makefile short-circuits every
+# target on other systems, so listing it here is safe on FreeBSD too.
+PROGRAMS = gnome-next-meeting opencode-podman-status
 
 PREFIX  ?= /usr/local
 DESTDIR ?=

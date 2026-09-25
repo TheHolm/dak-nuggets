@@ -19,6 +19,11 @@ build system fits its job, and documents itself in its own subdirectory.
 
 ## Included programs
 
+| Program | Platforms |
+| --- | --- |
+| [`gnome-next-meeting`](#gnome-next-meeting) | Linux, FreeBSD |
+| [`opencode-podman-status`](#opencode-podman-status) | **Linux only** |
+
 ### `gnome-next-meeting`
 
 Prints the time until the next calendar event for today, in `HH:MM` format
@@ -37,6 +42,36 @@ Typical DAK use — show the countdown on a button:
 
 See [gnome-next-meeting/README.markdown](gnome-next-meeting/README.markdown)
 for full details, build instructions and dependencies.
+
+### `opencode-podman-status`
+
+Reports what each [opencode](https://opencode.ai) instance running in a rootless
+[podman](https://podman.io) container is doing, as three six-character lines:
+`run: 3`, `wait:1`, `done:5` — how many instances are working, how many are
+waiting for an answer from you, and how many are idle. `--instance` reports one
+container instead.
+
+**Linux only.** It queries each instance by entering that container's user and
+network namespaces, and rootless podman does not exist on FreeBSD. It is
+therefore absent from FreeBSD packages, and its `make` targets short-circuit
+there so a collection-wide build still succeeds.
+
+Typical DAK use — show the summary on a button:
+
+```json
+{
+  "type": "text_exec",
+  "params": "opencode-podman-status",
+  "refresh": 5
+}
+```
+
+Each container must run opencode with an explicit port, e.g.
+`opencode --port 4096`; setting `server.port` in `opencode.json` does not work.
+
+See
+[opencode-podman-status/README.markdown](opencode-podman-status/README.markdown)
+for full details, including the security implications of that port.
 
 ## Building
 

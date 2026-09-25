@@ -45,6 +45,14 @@ Linux and FreeBSD, mirroring DAK's own target platforms. Helpers are CLI
 tools with no GUI. Code should compile and run on both platforms unless a
 program is explicitly documented otherwise.
 
+Where a program *is* documented otherwise, its platform support is declared in
+its own `README.markdown` and summarised in the **Platforms** column of the
+top-level `README.markdown` table, so the exception is visible without opening
+anything. Such a program simply omits the `ci-*.sh` for the target it does not
+support (that is what excludes it from packaging) and guards its own `Makefile`
+targets with `uname -s` so a collection-wide `make` still succeeds everywhere.
+`opencode-podman-status` is Linux-only on this basis — see `NOTES.md`.
+
 ## Layout
 
 One subdirectory per helper program. Each program directory is self-contained

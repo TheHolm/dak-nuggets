@@ -18,7 +18,10 @@ meson-private/
 
 # Rust
 target/
-Cargo.lock
+# Cargo.lock is deliberately NOT ignored. Every Rust program here is a binary,
+# not a library, and the Rust convention for binaries is to commit the lockfile:
+# it makes package builds reproducible and stops a bad upstream crate release
+# entering a build unnoticed. Libraries would be the other way round.
 
 # Go
 *.exe

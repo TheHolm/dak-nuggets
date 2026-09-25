@@ -334,6 +334,13 @@ orchestrators **discover** programs by globbing `*/ci-deb.sh` and
    non-C program this is also where its toolchain is installed (Rust/Go/...).
 5. Add the program's **runtime** dependencies to the step's `DEB_DEPENDS`
    environment variable (a union; also used for the bundle's `Depends:`).
+   **But note `DEB_DEPENDS` being a union makes it unusable as a per-program
+   default once there is more than one program**: each `ci-deb.sh` inherits the
+   same value, so a program that honours it declares every *other* program's
+   dependencies too. `opencode-podman-status` therefore ignores it outright and
+   reads `DEB_DEPENDS_OPENCODE_PODMAN_STATUS` instead (empty by default - Rust
+   links statically). A program with genuine runtime dependencies should follow
+   the same pattern rather than trusting the shared variable.
 6. Confirm the FreeBSD package name actually exists in the FreeBSD ports tree
    before relying on it (check `Mk/Uses/*.mk` or a category `Makefile` in
    github.com/freebsd/freebsd-ports - do not guess; `evolution-data-server`'s
@@ -343,6 +350,32 @@ orchestrators **discover** programs by globbing `*/ci-deb.sh` and
 The individual/bundle packages and the `publish-github-release` step need no
 changes - the orchestrators and `merge-stage-roots.sh` handle any number of
 programs automatically.
+
+### A deliberately Linux-only program
+
+`opencode-podman-status` is the first program that is not built for every target,
+so the pattern is worth recording:
+
+- **No `ci-freebsd.sh`.** That is the entire mechanism - `build-target-freebsd.sh`
+  globs for it, so its absence omits the program from FreeBSD packaging with no
+  other change. Nothing needs adding to `fetch-freebsd-deps.py`'s `--root` list
+  either.
+- `scripts/check-package-metadata.sh` globs **both** `*/ci-deb.sh` and
+  `*/ci-freebsd.sh` and de-duplicates, so a Linux-only program is still checked.
+- Its own `Makefile` guards every target with `uname -s` and exits 0 with a
+  message on non-Linux, so listing it in the root `PROGRAMS` keeps
+  collection-wide `make build`/`test` working on FreeBSD.
+- The exclusion is stated in the **Platforms** column of the top-level
+  `README.markdown` table, so it is visible without opening anything.
+
+Why it cannot support FreeBSD: it works by entering a rootless podman container's
+user and network namespaces. Podman on FreeBSD **requires root** - rootless mode
+is not supported - and is experimental there, built on jails with VNET, CNI and
+`pf` rather than namespaces. Published ports, which an alternative design would
+have used, are additionally not reachable from a FreeBSD host to itself
+(`conmon` holds the port while the actual routing depends on pf `rdr` rules, and
+locally-generated packets hit the socket instead of the redirect;
+`net.pf.filter_local=1` does not fix it).
 
 ## Woodpecker secret requirement
 
