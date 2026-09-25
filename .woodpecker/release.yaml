@@ -74,24 +74,24 @@ steps:
       # File modes are not trusted - see the note in this file's header.
       - chmod +x scripts/*.sh */ci-*.sh
       # Union of every program's build dependencies for this target.
-      - apt-get update && apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libglib2.0-dev libecal2.0-dev libedataserver1.2-dev dpkg-dev cargo
+      # ca-certificates must be explicit: cargo fetches crates over HTTPS, and
+      # --no-install-recommends drops it (it is only a Recommends). See NOTES.md.
+      - apt-get update && apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libglib2.0-dev libecal2.0-dev libedataserver1.2-dev dpkg-dev cargo ca-certificates
       - ./scripts/build-target-debs.sh "1~trixie" amd64 trixie
 
   - name: build-deb-ubuntu2604
     image: ubuntu:26.04
     depends_on: []
     environment:
-      # NOTE: these runtime package names/versions (e.g. the "-27t64" suffix)
-      # were verified against Debian trixie only. Ubuntu derives its GNOME
-      # packaging from Debian, so they are expected to match, but this has not
-      # been verified against a real Ubuntu 26.04 archive - re-check with
-      # `apt-cache policy libecal-2.0-3 libedataserver-1.2-27t64` inside an
-      # ubuntu:26.04 container and update if it differs. See NOTES.md.
+      # Runtime package names verified against the Ubuntu 26.04 (resolute)
+      # archive: libecal-2.0-3 and libedataserver-1.2-27t64 both exist there
+      # at 3.56.2-8. Re-check if a future LTS renames them. See NOTES.md.
       DEB_DEPENDS: "libecal-2.0-3, libedataserver-1.2-27t64"
     commands:
       # File modes are not trusted - see the note in this file's header.
       - chmod +x scripts/*.sh */ci-*.sh
-      - apt-get update && apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libglib2.0-dev libecal2.0-dev libedataserver1.2-dev dpkg-dev cargo
+      # Same list as build-deb-trixie, including the explicit ca-certificates.
+      - apt-get update && apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libglib2.0-dev libecal2.0-dev libedataserver1.2-dev dpkg-dev cargo ca-certificates
       - ./scripts/build-target-debs.sh "1~ubuntu2604" amd64 ubuntu2604
 
   - name: build-freebsd-pkg

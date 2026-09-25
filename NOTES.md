@@ -310,19 +310,16 @@ slowest step in the pipeline. This is expected and not a sign anything is
 wrong; `failure: ignore` exists precisely so this doesn't block the Linux
 releases regardless.
 
-## Ubuntu 26.04 package names: verified once, may need re-checking
+## Ubuntu 26.04 package names: verified
 
-`gnome-next-meeting`'s Ubuntu 26.04 `.deb` step assumes the same runtime
-package names/versions as Debian trixie (`libecal-2.0-3`,
-`libedataserver-1.2-27t64`) since Ubuntu derives its GNOME stack packaging
-from Debian's. This was not independently verified against a real Ubuntu
-26.04 archive (no local Docker to pull `ubuntu:26.04` and no reachable
-package-search endpoint at the time this was written - `scripts/
-check-target-freshness.sh` does confirm 26.04 is the current LTS, just not
-its exact package names/suffixes). Re-verify with `apt-cache policy
-libecal-2.0-3 libedataserver-1.2-27t64` inside a real `ubuntu:26.04` container
-before trusting a release built by that step, and update `release.yaml`'s
-`--depends` if the suffix differs.
+`gnome-next-meeting`'s Ubuntu 26.04 `.deb` step uses the same runtime package
+names as Debian trixie (`libecal-2.0-3`, `libedataserver-1.2-27t64`). These
+were checked against the real Ubuntu 26.04 (`resolute`) archive on
+packages.ubuntu.com: both exist there at `3.56.2-8`, matching the EDS 3.56.2
+the CI build links against. Re-check when moving to a newer LTS - the
+`-1.2-27t64` soname/t64 suffix is exactly the kind of thing that changes
+between releases (22.04 shipped `libedataserver-1.2-26`) - and update
+`release.yaml`'s `DEB_DEPENDS` if it differs.
 
 ## Adding a new program's release steps
 
@@ -351,6 +348,14 @@ orchestrators **discover** programs by globbing `*/ci-deb.sh` and
    the relevant target step(s) in `.woodpecker/release.yaml` (the environment
    is per-target and shared, so this is the union across programs). For a
    non-C program this is also where its toolchain is installed (Rust/Go/...).
+   **If the build downloads anything over HTTPS** (cargo fetching crates, `go
+   mod download`, pip, ...), list `ca-certificates` explicitly too: every
+   `apt-get install` here uses `--no-install-recommends`, and
+   `ca-certificates` is only a *Recommends* of cargo/curl, so without it the
+   container has no `/etc/ssl/certs/ca-certificates.crt` and the download
+   fails with `[77] Problem with the SSL CA cert`. This is how `v2026.09.25-2`
+   failed on both Linux targets (and `v2026.09.25-1`, the first release with a
+   Rust program, had the same install line).
 5. Add the program's **runtime** dependencies to the step's `DEB_DEPENDS`
    environment variable (a union; also used for the bundle's `Depends:`).
    **But note `DEB_DEPENDS` being a union makes it unusable as a per-program

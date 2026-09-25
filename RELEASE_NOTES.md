@@ -20,7 +20,7 @@ parses this structure to build each GitHub Release's body, printing from a
 No releases yet - this file gains its first `## vYYYY.MM.DD` entry when the
 first collection-wide tag is cut.
 
-## v2026.09.25-2 — gnome-next-meeting 0.3.2, opencode-podman-status 0.1.1
+## v2026.09.25-3 — gnome-next-meeting 0.3.2, opencode-podman-status 0.1.1
 
 ### User-facing changes
 - Fixed a warning `dpkg`/`apt` printed when removing the `dak-nuggets` bundle
@@ -37,6 +37,10 @@ first collection-wide tag is cut.
   source of executability at run time; the one call site outside CI
   (`make check-metadata`) now uses an explicit `bash` invocation instead. No
   packaged output is affected by this part. See `NOTES.md`.
+- Re-release of `v2026.09.25-2`, whose Debian and Ubuntu builds failed: the CI
+  containers lacked `ca-certificates`, so cargo could not fetch crates for
+  `opencode-podman-status`. Same program code and versions; only the CI
+  install line changed.
 
 ## v2026.09.25-1 — opencode-podman-status 0.1.0
 
