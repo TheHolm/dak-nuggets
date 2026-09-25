@@ -29,6 +29,12 @@ arch="$5"
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/.." && pwd)"
 
+# Package synopsis/description live in one place, shared with ci-freebsd.sh, so
+# the two packaging formats cannot describe the program differently - see
+# package-metadata.sh and NOTES.md. `set -u` above turns a missing variable
+# into a build failure rather than an empty control field.
+. "$here/package-metadata.sh"
+
 # NOTE: these runtime package names were verified against Debian trixie. If a
 # target's names/versions differ, the caller sets DEB_DEPENDS (see
 # .woodpecker/release.yaml and NOTES.md).
@@ -56,8 +62,8 @@ deb="$dist_dir/gnome-next-meeting_${version}-${revision}_${arch}.deb"
     --arch "$arch" \
     --stage-root "$stage_dir" \
     --output "$deb" \
-    --synopsis "Time until the next calendar meeting, for DAK" \
-    --description "Prints HH:MM until the next calendar event of the day by reading Evolution Data Server, for use as a DAK text_exec button." \
+    --synopsis "$PKG_SYNOPSIS" \
+    --description "$PKG_DESCRIPTION" \
     --depends "$depends"
 
 # Fail if the binary did not make it into the .deb.

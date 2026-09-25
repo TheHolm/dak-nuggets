@@ -35,6 +35,9 @@ version="${CI_COMMIT_TAG#v}"
 dist="$root/dist"
 mkdir -p "$dist"
 
+# Same metadata gate as the .deb path - see NOTES.md.
+"$root/scripts/check-package-metadata.sh" "$root"
+
 stages=()
 shopt -s nullglob
 for script in "$root"/*/ci-freebsd.sh; do

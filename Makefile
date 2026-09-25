@@ -12,7 +12,7 @@ PROGRAMS = gnome-next-meeting
 PREFIX  ?= /usr/local
 DESTDIR ?=
 
-.PHONY: all build test coverage install clean $(PROGRAMS)
+.PHONY: all build test coverage check-metadata install clean $(PROGRAMS)
 
 all: build
 
@@ -21,6 +21,12 @@ build: $(PROGRAMS)
 test: $(PROGRAMS:%=%.test)
 
 coverage: $(PROGRAMS:%=%.coverage)
+
+# Checks every program's package synopsis/description, and fails if a program's
+# version has moved on to a new feature series without its description being
+# re-reviewed. Run by the release pipeline too - see NOTES.md.
+check-metadata:
+	./scripts/check-package-metadata.sh
 
 install: $(PROGRAMS:%=%.install)
 

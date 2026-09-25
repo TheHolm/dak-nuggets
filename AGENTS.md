@@ -57,6 +57,9 @@ and carries, at minimum:
 - `NOTES.md` — agent-to-agent knowledge base for that program's build quirks,
   dependencies, and non-obvious behaviour; keep it updated, don't let it go
   stale
+- `package-metadata.sh` — the synopsis/description shipped in every package
+  format, in one place (sourced by the program's `ci-*.sh`), plus the
+  `PKG_METADATA_REVIEWED_FOR` marker that keeps it from going stale
 - its own build files (Meson for C/GLib, `Cargo.toml` for Rust, etc.)
 
 Top level:
@@ -165,6 +168,12 @@ new program, the shared-CI-workspace constraints, etc.).
   asked for; `Y` (minor) for a new feature; `Z` (patch) for bugfixes and
   other changes that don't add, remove, or change functionality. Release
   notes live in the program's own `RELEASE_NOTES.md`
+- A minor or major bump means behaviour changed, so it also requires re-reading
+  the things that *describe* that behaviour to users: the program's
+  `package-metadata.sh` (the synopsis/description shipped in every package) and
+  the opening of its `README.markdown`. Record the review by setting
+  `PKG_METADATA_REVIEWED_FOR` to the new `major.minor`; `make check-metadata`
+  and the release pipeline both fail until you do
 - When starting work on each new branch, ask the user whether to bump a
   version number (and if so, to what value) before writing any code
 - Never commit changes unless the user explicitly asks to commit

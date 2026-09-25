@@ -42,6 +42,10 @@ version="${CI_COMMIT_TAG#v}"
 dist="$root/dist"
 mkdir -p "$dist"
 
+# Refuse to package a program whose description has fallen behind it - see
+# scripts/check-package-metadata.sh and NOTES.md.
+"$root/scripts/check-package-metadata.sh" "$root"
+
 stages=()
 shopt -s nullglob
 for script in "$root"/*/ci-deb.sh; do

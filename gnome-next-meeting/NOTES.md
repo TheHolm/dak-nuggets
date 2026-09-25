@@ -20,6 +20,12 @@ be wrapped with `--before` / `--after` text.
   `libecal-2.0`.
 - Builds with Meson; the directory `Makefile` is a thin wrapper so the root
   orchestrator's `make build`/`install`/`test`/`clean` work unchanged.
+- The package synopsis/description shipped in the `.deb` and the FreeBSD
+  `.pkg` are **not** written in `ci-deb.sh`/`ci-freebsd.sh`: both source
+  `package-metadata.sh`, so the two formats cannot describe the program
+  differently. Change behaviour, re-read that file, and bump its
+  `PKG_METADATA_REVIEWED_FOR` marker - `make check-metadata` and the release
+  pipeline fail on a minor/major bump until you do. See the root `NOTES.md`.
 - The version lives **only** in `meson.build`'s `project(version: …)`. It
   reaches the `--help` summary through `-DGNM_VERSION`, set from
   `meson.project_version()` in the executable's `c_args`, so the help text

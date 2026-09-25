@@ -1,5 +1,21 @@
 # Release notes — gnome-next-meeting
 
+## v0.3.1
+
+- The package synopsis and description now describe what the program actually
+  does. Both the `.deb` and the FreeBSD `.pkg` still advertised the 0.2
+  behaviour ("Prints HH:MM until the next calendar event of the day"), which
+  has been wrong since 0.3.0 introduced a countdown per meeting and the
+  countdown to the end of the meeting in progress.
+- Low-level: the synopsis/description moved out of `ci-deb.sh` and
+  `ci-freebsd.sh` into a single `package-metadata.sh` that both source, so the
+  two packaging formats can no longer drift apart. It also carries a
+  `PKG_METADATA_REVIEWED_FOR` marker; the new
+  `scripts/check-package-metadata.sh` fails the build when a program's
+  `major.minor` moves past the version its description was last reviewed
+  against, and also checks Debian synopsis hygiene. It runs from both target
+  orchestrators and from the new root `make check-metadata`.
+
 ## v0.3.0
 
 - The output is no longer a single countdown to the next meeting: every
