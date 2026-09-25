@@ -20,6 +20,24 @@ parses this structure to build each GitHub Release's body, printing from a
 No releases yet - this file gains its first `## vYYYY.MM.DD` entry when the
 first collection-wide tag is cut.
 
+## v2026.09.25-2 — gnome-next-meeting 0.3.2, opencode-podman-status 0.1.1
+
+### User-facing changes
+- Fixed a warning `dpkg`/`apt` printed when removing the `dak-nuggets` bundle
+  package or either program's own `.deb`: `unable to remove directory
+  '/usr/local' ... may be a mount point?`. `gnome-next-meeting` 0.3.2 and
+  `opencode-podman-status` 0.1.1 now install their binary under `/usr/bin`,
+  per Debian policy, instead of `/usr/local/bin`.
+
+### Details
+- See `gnome-next-meeting/RELEASE_NOTES.md` (v0.3.2) and
+  `opencode-podman-status/RELEASE_NOTES.md` (v0.1.1).
+- Repo-wide: no file is committed with the executable bit set any more
+  (previously an inconsistent mix). CI's existing `chmod +x` remains the sole
+  source of executability at run time; the one call site outside CI
+  (`make check-metadata`) now uses an explicit `bash` invocation instead. No
+  packaged output is affected by this part. See `NOTES.md`.
+
 ## v2026.09.25-1 — opencode-podman-status 0.1.0
 
 ### User-facing changes

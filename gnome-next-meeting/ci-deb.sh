@@ -48,7 +48,7 @@ version="$(grep -m1 "version:" "$here/meson.build" | sed -E "s/.*version:[[:spac
 # be reused (it can be unreadable by this step's Meson version).
 rm -rf "$build_dir"
 
-meson setup "$build_dir" "$here" --prefix=/usr/local
+meson setup "$build_dir" "$here" --prefix=/usr
 meson compile -C "$build_dir"
 DESTDIR="$stage_dir" meson install -C "$build_dir"
 
@@ -67,4 +67,4 @@ deb="$dist_dir/gnome-next-meeting_${version}-${revision}_${arch}.deb"
     --depends "$depends"
 
 # Fail if the binary did not make it into the .deb.
-dpkg-deb -c "$deb" | grep -qF 'usr/local/bin/gnome-next-meeting'
+dpkg-deb -c "$deb" | grep -qF 'usr/bin/gnome-next-meeting'

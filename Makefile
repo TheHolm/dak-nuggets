@@ -28,7 +28,7 @@ coverage: $(PROGRAMS:%=%.coverage)
 # version has moved on to a new feature series without its description being
 # re-reviewed. Run by the release pipeline too - see NOTES.md.
 check-metadata:
-	./scripts/check-package-metadata.sh
+	bash scripts/check-package-metadata.sh
 
 install: $(PROGRAMS:%=%.install)
 
