@@ -1,5 +1,18 @@
 # Release notes — opencode-podman-status
 
+## v0.1.1
+
+- Low-level: the `.deb` installed the binary under `/usr/local/bin` instead of
+  `/usr/bin`. `/usr/local` is reserved for the local admin by Debian policy and
+  is never owned by any other package, so `dak-nuggets` ended up the sole
+  claimant of that directory; removing the package then tried to `rmdir
+  /usr/local`, which failed loudly ("Device or resource busy - directory may
+  be a mount point?") whenever `/usr/local` happened to be a separate mount -
+  a legitimate, policy-sanctioned setup (e.g. a shared/NFS `/usr/local`).
+  `ci-deb.sh` now stages the binary at `usr/bin/opencode-podman-status`,
+  matching Debian convention. This program has no FreeBSD packaging (Linux
+  only), so there is no `.pkg` counterpart affected.
+
 ## v0.1.0
 
 First release.

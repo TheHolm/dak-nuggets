@@ -66,7 +66,7 @@ CARGO_TARGET_DIR="$build_dir" cargo build --release --manifest-path "$here/Cargo
 
 install -D -m 755 \
     "$build_dir/release/opencode-podman-status" \
-    "$stage_dir/usr/local/bin/opencode-podman-status"
+    "$stage_dir/usr/bin/opencode-podman-status"
 
 deb="$dist_dir/opencode-podman-status_${version}-${revision}_${arch}.deb"
 
@@ -84,4 +84,4 @@ deb="$dist_dir/opencode-podman-status_${version}-${revision}_${arch}.deb"
     --depends "$depends"
 
 # Fail if the binary did not make it into the .deb.
-dpkg-deb -c "$deb" | grep -qF 'usr/local/bin/opencode-podman-status'
+dpkg-deb -c "$deb" | grep -qF 'usr/bin/opencode-podman-status'

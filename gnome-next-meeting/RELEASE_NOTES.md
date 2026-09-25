@@ -1,5 +1,18 @@
 # Release notes — gnome-next-meeting
 
+## v0.3.2
+
+- Low-level: the `.deb` installed the binary under `/usr/local/bin` instead of
+  `/usr/bin`. `/usr/local` is reserved for the local admin by Debian policy and
+  is never owned by any other package, so `dak-nuggets` ended up the sole
+  claimant of that directory; removing the package then tried to `rmdir
+  /usr/local`, which failed loudly ("Device or resource busy - directory may
+  be a mount point?") whenever `/usr/local` happened to be a separate mount -
+  a legitimate, policy-sanctioned setup (e.g. a shared/NFS `/usr/local`).
+  `ci-deb.sh` now passes `--prefix=/usr` to Meson, matching Debian convention;
+  the FreeBSD `.pkg` already correctly used `/usr/local` (FreeBSD's own
+  standard prefix for packaged software) and is unaffected.
+
 ## v0.3.1
 
 - The package synopsis and description now describe what the program actually
