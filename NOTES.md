@@ -90,39 +90,58 @@ one step's Meson data in the shared `gnome-next-meeting/build/` made the
 other fail with `Build data file ... references functions or classes that
 don't exist ... generated with an old version of meson`.
 
-## CI does not trust the checked-out file modes
+## No file in this repo is ever committed with the executable bit set
 
-Every CI step begins with a `chmod +x` of the scripts it is about to run
-(`scripts/*.sh`, plus `*/ci-*.sh` in the steps that build programs). This is
-deliberate and must not be tidied away on the grounds that the modes are
-correct in git today.
+Git tracks every file, `.sh` and `.py` alike, as mode `644`. This is a
+deliberate invariant, not an oversight to "fix" by chmod'ing something back to
+`755` - see below for why, and don't reintroduce a `755` blob no matter how
+correct the modes look in a given checkout today.
 
-The pipeline invokes shell scripts as `./scripts/foo.sh`, which needs the
-executable bit, and that bit is easy to lose without anyone noticing: a mirror
-or `rsync` that doesn't preserve modes, a working copy hosted on a filesystem
-without POSIX permissions, or simply a commit made from such a checkout. The
-failure mode is a bare `Permission denied` and exit 126, far away from anything
-resembling its cause - and on a *tag* build, i.e. exactly when a release is
-being cut.
+The bit is easy to lose without anyone noticing (a mirror or `rsync` that
+doesn't preserve modes, a working copy on a filesystem without POSIX
+permissions, an editor or tool that resets it on save) and just as easy to
+*gain* unnoticed the other way (a local `chmod +x` picked up by a later
+`git add`/`git commit`). Either direction has bitten this repo already: a
+`755`/`644` split that had drifted inconsistently across the tracked `.sh`
+files, entirely by accident, is what prompted normalizing to `644`
+everywhere. Committing every script as non-executable removes the bit as a
+thing that can ever drift again - there is nothing for a bad mirror, editor,
+or commit to lose.
 
-`chmod` fixes the bit on disk in the shared workspace, so it covers not just
-the invocations in the workflow files but also the nested ones inside the
-scripts themselves - `build-target-debs.sh` running each `<program>/ci-deb.sh`,
-and both target orchestrators running `merge-stage-roots.sh` and
-`build-deb.sh`. The Python scripts (`fetch-freebsd-deps.py`,
-`build-freebsd-pkg.py`) are always invoked through `python3` and so were never
-affected.
+Since git no longer carries the bit, every place that actually *runs* one of
+these scripts must either invoke it through an explicit interpreter
+(`bash foo.sh`, `python3 foo.py` - never needs the bit) or `chmod +x` it
+first. This repo does both, depending on where the invocation happens:
 
-Two details worth keeping:
+- **CI** (`.woodpecker/*.yaml`): every step begins with a `chmod +x` of the
+  scripts it is about to run (`scripts/*.sh`, plus `*/ci-*.sh` in the steps
+  that build programs), before invoking them as `./scripts/foo.sh`. This
+  predates the `644`-everywhere normalization (it was originally added just to
+  survive a lost bit on an otherwise-`755` file) but is exactly as necessary
+  now that no file starts executable at all. `chmod` fixes the bit on disk in
+  the shared workspace, so it covers not just the invocations in the workflow
+  files but also the nested ones inside the scripts themselves -
+  `build-target-debs.sh` running each `<program>/ci-deb.sh`, and both target
+  orchestrators running `merge-stage-roots.sh` and `build-deb.sh`. The Python
+  scripts (`fetch-freebsd-deps.py`, `build-freebsd-pkg.py`) are always invoked
+  through `python3` and so were never affected either way.
 
-- The steps that run no program scripts (`publish-github-release`, and the
-  freshness check) use the narrow `chmod +x scripts/*.sh`. Woodpecker runs
-  commands through `/bin/sh` (dash in these images), where an unmatched glob is
-  passed through literally, so a `*/ci-*.sh` that matched nothing would fail
-  the step for no reason.
-- No separate "fix permissions" step: the three build steps are `depends_on: []`
-  precisely so they run concurrently, and a shared prerequisite step would
-  serialise them to save a millisecond of `chmod`.
+  Two details worth keeping:
+
+  - The steps that run no program scripts (`publish-github-release`, and the
+    freshness check) use the narrow `chmod +x scripts/*.sh`. Woodpecker runs
+    commands through `/bin/sh` (dash in these images), where an unmatched glob
+    is passed through literally, so a `*/ci-*.sh` that matched nothing would
+    fail the step for no reason.
+  - No separate "fix permissions" step: the three build steps are
+    `depends_on: []` precisely so they run concurrently, and a shared
+    prerequisite step would serialise them to save a millisecond of `chmod`.
+
+- **The one entry point outside CI**, the root `make check-metadata`, does not
+  `chmod` anything - it invokes `bash scripts/check-package-metadata.sh`
+  directly, so it never depends on the bit at all. (Plain `sh` is not enough:
+  the script uses `shopt`, a bash-only builtin.) Prefer this pattern - an
+  explicit interpreter - over adding more `chmod` calls outside CI.
 
 ## Package metadata, and stopping it from going stale
 
