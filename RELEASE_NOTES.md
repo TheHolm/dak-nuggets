@@ -16,6 +16,20 @@ parses this structure to build each GitHub Release's body, printing from a
 No releases yet - this file gains its first `## vYYYY.MM.DD` entry when the
 first collection-wide tag is cut.
 
+## v2026.09.25 — gnome-next-meeting 0.3.1
+
+### User-facing changes
+- `gnome-next-meeting` 0.3.1: the package synopsis and description now describe
+  what the program actually does — both the `.deb` and the FreeBSD `.pkg` still
+  advertised the pre-0.3.0 behaviour of printing a single `HH:MM` countdown to
+  the next event.
+
+### Details
+- The packaging text now lives in one `package-metadata.sh` per program instead
+  of being duplicated per packaging format, and a new metadata check fails the
+  release when a program's description falls behind a feature bump. See
+  `NOTES.md` and `gnome-next-meeting/RELEASE_NOTES.md`.
+
 ## v2026.09.24 — gnome-next-meeting 0.3.0
 
 ### User-facing changes

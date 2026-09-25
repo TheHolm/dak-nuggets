@@ -79,6 +79,61 @@ Two details worth keeping:
   precisely so they run concurrently, and a shared prerequisite step would
   serialise them to save a millisecond of `chmod`.
 
+## Package metadata, and stopping it from going stale
+
+Each program's package synopsis and description live in exactly one file,
+`<program>/package-metadata.sh`, which both `ci-deb.sh` and `ci-freebsd.sh`
+*source* (it is never executed, so it needs no executable bit and the CI
+`chmod` globs deliberately don't match it). It carries three variables:
+`PKG_SYNOPSIS`, `PKG_DESCRIPTION` and `PKG_METADATA_REVIEWED_FOR`.
+
+This exists because the text went stale in a way nobody noticed. Before it, the
+same two strings were written out separately in `ci-deb.sh` and
+`ci-freebsd.sh` - so they could drift from each other as well as from the
+program - and by the time gnome-next-meeting 0.3.0 printed a countdown per
+meeting plus the meeting in progress, both packages still described it as
+"Prints HH:MM until the next calendar event of the day". Nothing in the release
+process ever asked anyone to look.
+
+`scripts/check-package-metadata.sh` is the guard. It discovers programs exactly
+as the release pipeline does (globbing `*/ci-deb.sh` and `*/ci-freebsd.sh`,
+deduped, so a FreeBSD-only program is not skipped) and per program checks that
+the metadata file exists, that the synopsis and description are non-empty, that
+the synopsis obeys Debian policy style (at most 72 characters, no trailing full
+stop, no leading article), and - the real point - that
+`PKG_METADATA_REVIEWED_FOR` matches the program's current `major.minor`. A
+minor or major bump therefore fails the build until someone re-reads the
+description and moves the marker. Patch versions are ignored, because a patch
+release changes no behaviour by definition.
+
+It runs from `scripts/build-target-debs.sh` and
+`scripts/build-target-freebsd.sh` (so every release is gated - the `.deb` path
+is the real gate, since the FreeBSD step is `failure: ignore`) and from
+`make check-metadata` at the root for local use.
+
+Design decisions worth not re-litigating:
+
+- **No git history in the check.** An earlier idea was to compare against the
+  last tag (`git describe`, or diffing `meson.build` against `<tag>:...`).
+  Woodpecker's clone is shallow and tags may be absent, so that would be flaky
+  exactly at release time. Comparing the marker against the version - two files
+  in the working tree - always works, in CI and locally.
+- **No generating package text from README or `--help`.** A Debian synopsis has
+  length and style rules that README prose doesn't obey; the extended
+  description would need reflowing out of Markdown; and FreeBSD builds are
+  cross-compiled, so the built binary cannot be run on the builder to extract
+  anything. A forced review beats a fake derivation.
+- **Version discovery is per-language with an honest fallback:** `meson.build`,
+  else `Cargo.toml`, else warn and skip the staleness check for that program
+  rather than invent a rule for a language the repo doesn't have yet.
+- The marker can be bumped without reading anything, so this guarantees a
+  decision was made at the right moment, not that the prose is good. That is
+  the ceiling without auto-generation.
+- The **bundle** package's own synopsis/description
+  (`build-target-debs.sh`/`build-target-freebsd.sh`) are deliberately outside
+  all of this: they say "All dak-nuggets helper programs" and describe no
+  behaviour, so there is nothing to go stale.
+
 ## Packaging scripts (`scripts/`)
 
 Generic, language-agnostic tooling:
@@ -212,24 +267,29 @@ contents (Woodpecker YAML can't loop over directories) - instead the target
 orchestrators **discover** programs by globbing `*/ci-deb.sh` and
 `*/ci-freebsd.sh`. So adding a program means:
 
-1. Add `<program>/ci-deb.sh` (copy gnome-next-meeting's as a template): build
-   and stage-install the program, then call `scripts/build-deb.sh` with that
-   program's metadata. It receives target-specific paths from the caller, so
-   it must not hardcode `build`/`stage-root` directory names.
-2. If the program can be cross-compiled for FreeBSD, add
+1. Add `<program>/package-metadata.sh` (copy gnome-next-meeting's as a
+   template): `PKG_SYNOPSIS`, `PKG_DESCRIPTION` and
+   `PKG_METADATA_REVIEWED_FOR` set to the program's current `major.minor`.
+   `scripts/check-package-metadata.sh` fails the release without it.
+2. Add `<program>/ci-deb.sh` (copy gnome-next-meeting's as a template): source
+   `package-metadata.sh`, build and stage-install the program, then call
+   `scripts/build-deb.sh` with that program's metadata. It receives
+   target-specific paths from the caller, so it must not hardcode
+   `build`/`stage-root` directory names.
+3. If the program can be cross-compiled for FreeBSD, add
    `<program>/ci-freebsd.sh` (same idea, calling
    `scripts/build-freebsd-pkg.py`). Skipping this file just omits the program
    from FreeBSD packaging - there is nothing else to wire up. But **do** add
    the program's FreeBSD dependency-closure roots to the `--root` list of the
    `fetch-freebsd-deps.py` call in the `build-freebsd-pkg` step, and any
    pkg-config modules to verify to its `--pkg-config-check` list.
-3. Add the program's **build** dependencies to the `apt-get install` line of
+4. Add the program's **build** dependencies to the `apt-get install` line of
    the relevant target step(s) in `.woodpecker/release.yaml` (the environment
    is per-target and shared, so this is the union across programs). For a
    non-C program this is also where its toolchain is installed (Rust/Go/...).
-4. Add the program's **runtime** dependencies to the step's `DEB_DEPENDS`
+5. Add the program's **runtime** dependencies to the step's `DEB_DEPENDS`
    environment variable (a union; also used for the bundle's `Depends:`).
-5. Confirm the FreeBSD package name actually exists in the FreeBSD ports tree
+6. Confirm the FreeBSD package name actually exists in the FreeBSD ports tree
    before relying on it (check `Mk/Uses/*.mk` or a category `Makefile` in
    github.com/freebsd/freebsd-ports - do not guess; `evolution-data-server`'s
    real FreeBSD package name, `databases/evolution-data-server`, was confirmed

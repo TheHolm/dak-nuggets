@@ -28,6 +28,9 @@ deps_file="$5"
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/.." && pwd)"
 
+# Same single source of packaging text as ci-deb.sh - see package-metadata.sh.
+. "$here/package-metadata.sh"
+
 version="$(grep -m1 "version:" "$here/meson.build" | sed -E "s/.*version:[[:space:]]*'([^']+)'.*/\1/")"
 
 # Clean build directory for the same reason as ci-deb.sh.
@@ -46,8 +49,8 @@ python3 "$root/scripts/build-freebsd-pkg.py" \
     --version "$version" \
     --stage-root "$stage_dir" \
     --deps-file "$deps_file" \
-    --comment "Time until the next calendar meeting, for DAK" \
-    --desc "Prints HH:MM until the next calendar event of the day by reading Evolution Data Server, for use as a DAK text_exec button." \
+    --comment "$PKG_SYNOPSIS" \
+    --desc "$PKG_DESCRIPTION" \
     --www "https://github.com/TheHolm/dak-nuggets" \
     --output "$pkg"
 
