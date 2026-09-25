@@ -16,6 +16,51 @@ together. Tags are always created manually, never by CI - see AGENTS.md's
 "Branching & releases" convention for when to cut one (a branch that bumped
 at least one program's version, merged to master).
 
+When more than one release is cut on the same day, the second and subsequent
+tags take a `-N` suffix: `v2026.09.25`, then `v2026.09.25-1`, `v2026.09.25-2`.
+(`v2026.09.23.1` predates the convention and uses a dot; leave it alone.)
+
+### Why the tag suffix is folded into the date for package versions
+
+`build-target-debs.sh` and `build-target-freebsd.sh` derive the **bundle**
+package's version from the tag (`version="${CI_COMMIT_TAG#v}"`) - per-program
+packages use their own version from `meson.build` instead - and both then
+replace `-` with `.`, so `v2026.09.25-1` ships as `2026.09.25.1`. A hyphen
+must not reach a package version:
+
+- **Debian**: a version is `[epoch:]upstream_version[-debian_revision]` and the
+  **last** hyphen is the separator. Passing the tag through unchanged yields
+  `2026.09.25-1-1~trixie`, which `dpkg` does accept (verified: `1.0-1-2` is
+  valid, while `_` in a revision is rejected outright) and which even sorts
+  correctly - but it reads as though `-1` were the revision, when the revision
+  is really `1~trixie`. Debian's own idiom for "same source, rebuilt" is to
+  bump that revision, which here is already spoken for: it encodes the target
+  (`1~trixie`, `1~ubuntu2604`). When the date *is* the upstream version, the
+  counter therefore has to live inside it, where Debian practice is a dot or a
+  `+` (cf. the `+really` idiom, e.g. Debian's own `gcovr 7.2+really-1.1`).
+- **FreeBSD**: a package is `name-version`, split on the last hyphen, so ports
+  policy forbids a hyphen in `PORTVERSION` at all (that is what
+  `DISTVERSIONSUFFIX` exists for). FreeBSD's equivalents of a rebuild counter
+  are the dedicated suffixes `_N` (`PORTREVISION`) and `,N` (`PORTEPOCH`), and
+  `build-freebsd-pkg.py` has no revision field to put one in - it writes
+  `--version` straight into the manifest. A hyphen there would simply be
+  malformed.
+
+Folding to `.N` keeps the ordering that matters, verified with
+`dpkg --compare-versions`:
+
+```
+2026.09.25-1~trixie  <  2026.09.25.1-1~trixie  <  2026.09.25.2-1~trixie
+                     <  2026.09.26-1~trixie
+```
+
+A further wrinkle in favour of a dot, should the tag style ever be revisited: a
+`-suffix` conventionally marks a *pre-release* and sorts **below** the plain
+version (SemVer's rule, and the reason git has `versionsort.suffix` /
+`versionsort.prereleaseSuffix`). `dpkg` happening to sort `2026.09.25-1` above
+`2026.09.25` is Debian-specific behaviour, not a portable property - another
+reason not to let the tag's spelling leak into package metadata.
+
 `.woodpecker/release.yaml` has exactly **one build step per target platform**
 (Debian trixie, Ubuntu 26.04 LTS, FreeBSD), each of which sets up its
 target's environment once and then builds every program plus the bundle.

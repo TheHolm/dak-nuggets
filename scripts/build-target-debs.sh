@@ -38,6 +38,12 @@ if [[ -z "${CI_COMMIT_TAG:-}" ]]; then
     exit 1
 fi
 version="${CI_COMMIT_TAG#v}"
+# A same-day second release is tagged vYYYY.MM.DD-N (see AGENTS.md), but a
+# hyphen must not reach a package version: in Debian it would be read as the
+# start of the debian_revision, giving the double-hyphen "2026.09.25-1-1~trixie",
+# and a hyphen is not part of FreeBSD's version format at all. Fold it into the
+# date instead, which keeps the same ordering - see NOTES.md.
+version="${version//-/.}"
 
 dist="$root/dist"
 mkdir -p "$dist"

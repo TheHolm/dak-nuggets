@@ -31,6 +31,9 @@ if [[ -z "${CI_COMMIT_TAG:-}" ]]; then
     exit 1
 fi
 version="${CI_COMMIT_TAG#v}"
+# Fold a same-day release suffix (vYYYY.MM.DD-N) into the date: a hyphen is not
+# part of FreeBSD's version format. Same reasoning as build-target-debs.sh.
+version="${version//-/.}"
 
 dist="$root/dist"
 mkdir -p "$dist"

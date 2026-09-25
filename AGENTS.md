@@ -107,7 +107,8 @@ above, or build an individual program from its own directory. Each program's
 ## Releases & packaging
 
 Every program is versioned independently (see Conventions), but releases are
-collection-wide: a single date-based tag (e.g. `v2026.09.22`) triggers
+collection-wide: a single date-based tag (e.g. `v2026.09.22`, or
+`v2026.09.22-1` for a second release on the same day) triggers
 `.woodpecker/release.yaml`, which rebuilds and republishes **every**
 program's packages at their current versions, plus one additional "bundle"
 package per target (Debian trixie, Ubuntu LTS, FreeBSD) containing every
@@ -163,7 +164,13 @@ new program, the shared-CI-workspace constraints, etc.).
 - A release is exactly a branch that bumped at least one program's version,
   merged to master; branches merged without any version bump (docs, tests,
   non-packaging tooling) are never tagged. Tag format is a single date-based
-  tag for the whole collection, `vYYYY.MM.DD`
+  tag for the whole collection, `vYYYY.MM.DD`. When more than one release is
+  cut on the same day, suffix the second and subsequent ones `-1`, `-2`, … —
+  e.g. `v2026.09.25`, then `v2026.09.25-1`, then `v2026.09.25-2`. The first
+  release of a day carries no suffix. (`v2026.09.23.1` predates this
+  convention; don't copy its dotted style.) The suffix never reaches a package
+  version: the release scripts fold the hyphen into the date, so
+  `v2026.09.25-1` packages as `2026.09.25.1` — see `NOTES.md`
 - Each program version follows `X.Y.Z`: `X` (major) only when explicitly
   asked for; `Y` (minor) for a new feature; `Z` (patch) for bugfixes and
   other changes that don't add, remove, or change functionality. Release

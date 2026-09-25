@@ -7,6 +7,10 @@ covering every program's packages built at that point - see AGENTS.md's
 `RELEASE_NOTES.md`; this file only ever lists which programs changed and
 points there.
 
+A heading must repeat the tag **verbatim**, including a same-day `-N` suffix
+(`## v2026.09.25-1 — …`), because `scripts/extract-release-notes.sh` looks the
+entry up by exact tag string.
+
 Each entry has a **User-facing changes** summary (what also appears in the
 tagged merge commit's own description) and a **Details** section with
 anything that doesn't fit a one-line pointer. `scripts/extract-release-notes.sh`

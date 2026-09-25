@@ -1,7 +1,8 @@
 # Builds and publishes release artifacts to a GitHub Release. Only ever runs
 # on tag pushes matching v* (this repo's tag convention - a single date-based
-# tag per collection release, e.g. v2026.09.22; see AGENTS.md's "Branching &
-# releases" convention). Never runs on ordinary branch pushes or pull
+# tag per collection release, e.g. v2026.09.22, with v2026.09.22-1, -2, ... for
+# further releases on the same day; see AGENTS.md's "Branching & releases"
+# convention). Never runs on ordinary branch pushes or pull
 # requests, and tags themselves are always created manually - this workflow
 # never creates one itself.
 #
