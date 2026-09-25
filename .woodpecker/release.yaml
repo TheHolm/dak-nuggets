@@ -64,14 +64,17 @@ steps:
     image: debian:trixie-slim
     depends_on: []
     environment:
-      # Union of every program's runtime dependencies for this target. See the
-      # "Adding a new program's release steps" checklist in NOTES.md.
+      # Union of every program's runtime dependencies for this target, used for
+      # the bundle package's Depends field and forwarded to each program's
+      # ci-deb.sh. Note opencode-podman-status deliberately ignores it (Rust
+      # links statically, so it has none) - see the "Adding a new program's
+      # release steps" checklist in NOTES.md.
       DEB_DEPENDS: "libecal-2.0-3, libedataserver-1.2-27t64"
     commands:
       # File modes are not trusted - see the note in this file's header.
       - chmod +x scripts/*.sh */ci-*.sh
       # Union of every program's build dependencies for this target.
-      - apt-get update && apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libglib2.0-dev libecal2.0-dev libedataserver1.2-dev dpkg-dev
+      - apt-get update && apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libglib2.0-dev libecal2.0-dev libedataserver1.2-dev dpkg-dev cargo
       - ./scripts/build-target-debs.sh "1~trixie" amd64 trixie
 
   - name: build-deb-ubuntu2604
@@ -88,7 +91,7 @@ steps:
     commands:
       # File modes are not trusted - see the note in this file's header.
       - chmod +x scripts/*.sh */ci-*.sh
-      - apt-get update && apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libglib2.0-dev libecal2.0-dev libedataserver1.2-dev dpkg-dev
+      - apt-get update && apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libglib2.0-dev libecal2.0-dev libedataserver1.2-dev dpkg-dev cargo
       - ./scripts/build-target-debs.sh "1~ubuntu2604" amd64 ubuntu2604
 
   - name: build-freebsd-pkg
