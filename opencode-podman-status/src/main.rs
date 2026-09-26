@@ -5,38 +5,48 @@
 mod discover;
 mod http;
 mod ident;
-mod nsenter;
+mod ns_socket;
 mod probe;
 mod render;
 mod sockets;
 mod status;
 
 use std::process::ExitCode;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use discover::Container;
 use probe::Report;
+use sockets::Discovery;
 use status::{Counts, State};
 
 /// Program name used in messages.
 const PROGRAM: &str = "opencode-podman-status";
 
-/// Argument that puts the program into its in-namespace probe mode.
-///
-/// Double-underscored because it is internal: the parent re-executes itself with
-/// it after entering a container's namespaces. Not documented for users.
-const PROBE_ARG: &str = "__probe";
-
-/// Default per-request timeout.
+/// Default time budget for probing one container.
 ///
 /// DAK re-invokes this program on a timer, so a wedged container must never hold
-/// it up. Measured against opencode 1.18.32: a warm request costs 1.5-5 ms, and
-/// the first `/session/status` after startup around 360 ms - but an instance
-/// probed the moment `/global/health` starts answering can be slower still, which
-/// an earlier 1500 ms default was observed to trip over. 2500 ms leaves a wide
-/// margin while staying under any sensible DAK refresh interval; probes run in
-/// parallel, so this bounds the whole run, not each container.
+/// it up. This is a hard deadline for *everything* one container costs -
+/// entering its namespace and every request and response - not a per-read
+/// timeout, so a server that drips bytes cannot stretch it. Measured against
+/// opencode 1.18.32: a warm request costs 1.5-5 ms, and the first
+/// `/session/status` after startup around 360 ms - but an instance probed the
+/// moment `/global/health` starts answering can be slower still, which an
+/// earlier 1500 ms default was observed to trip over. 2500 ms leaves a wide
+/// margin while staying under any sensible DAK refresh interval; containers are
+/// probed in parallel, so this also bounds the whole run.
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(2500);
+
+/// Most bytes read from one container across all its responses.
+///
+/// A handful of requests of a few KiB each is normal; this only stops a hostile
+/// server making a nine-container run cost gigabytes.
+const BYTE_BUDGET: usize = 4 * http::MAX_RESPONSE;
+
+/// Sockets fetched from each container's namespace, which is also the most
+/// requests one container can cost: health, three status endpoints, up to four
+/// busy sessions' latest messages or the session list, with room for a second
+/// candidate port.
+const SOCKETS_PER_CONTAINER: usize = 12;
 
 /// What the user asked for.
 #[derive(Debug)]
@@ -53,8 +63,6 @@ enum Mode {
     /// does it say" without depending on podman listing it. Also what the
     /// namespace-entry integration test drives.
     Pid(i32),
-    /// In-namespace probe of a single instance.
-    Probe,
     /// Usage text.
     Help,
     /// Version string.
@@ -94,7 +102,8 @@ Options:
   --pid <n>               Diagnostic: probe this process's namespaces directly,
                           bypassing podman, and print the raw JSON report.
   --port <n>              Use this port instead of discovering it.
-  --timeout <ms>          Per-request timeout (default 2500).
+  --timeout <ms>          Time budget per container, all requests included
+                          (default 2500).
   -h, --help              This text.
   -V, --version           Version.
 
@@ -120,7 +129,6 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
 
     while index < args.len() {
         match args[index].as_str() {
-            PROBE_ARG => options.mode = Mode::Probe,
             "--instance" => {
                 let v = value(args, &mut index, "--instance")?.to_string();
                 options.mode = Mode::Instance(v);
@@ -160,27 +168,37 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Probes one container by entering its namespaces and re-executing ourselves.
+/// Probes one container, entirely from outside it.
+///
+/// 1. Finds opencode's port by socket ownership, reading the container's
+///    `/proc` tables from the host (unless `--port` names it).
+/// 2. Has a short-lived child create sockets inside the container's network
+///    namespace and hand them back (see [`ns_socket`]).
+/// 3. Talks HTTP over those sockets from this process, within one deadline.
 ///
 /// Returns a [`Report`] in every case, including failure, so the caller always has
 /// something to render.
 fn probe_container(container: &Container, options: &Options) -> Report {
+    let deadline = Instant::now() + options.timeout;
     let pid = match container.pid {
         Some(pid) => pid,
         None => return Report::failed("container has no running process"),
     };
 
-    if nsenter::shares_our_namespace(pid) {
+    if ns_socket::shares_our_namespace(pid) {
         return Report::failed("shares our network namespace (are we inside it?)");
     }
 
-    let exe = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(e) => return Report::failed(format!("cannot find own executable: {e}")),
+    let ports = match options.port {
+        Some(port) => vec![port],
+        None => match sockets::discover(pid) {
+            Discovery::Found(ports) => ports,
+            other => return Report::failed(other.reason()),
+        },
     };
 
-    let mut command = match nsenter::command_in_namespaces(pid, &exe.to_string_lossy()) {
-        Ok(command) => command,
+    let namespaces = match ns_socket::Namespaces::open(pid) {
+        Ok(ns) => ns,
         Err(e) => {
             return Report::failed(format!(
                 "cannot open namespaces of pid {pid}: {e} \
@@ -188,40 +206,22 @@ fn probe_container(container: &Container, options: &Options) -> Report {
             ))
         }
     };
-
-    command.arg(PROBE_ARG);
-    command.arg("--timeout").arg(options.timeout.as_millis().to_string());
-    if let Some(port) = options.port {
-        command.arg("--port").arg(port.to_string());
-    }
-
-    let output = match command.output() {
-        Ok(output) => output,
-        Err(e) => return Report::failed(format!("probe failed to run: {e}")),
+    let sockets = match namespaces.sockets(SOCKETS_PER_CONTAINER, deadline) {
+        Ok(sockets) => sockets,
+        Err(e) => return Report::failed(format!("cannot enter namespaces of pid {pid}: {e}")),
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let detail = if stderr.is_empty() { "no output".to_string() } else { stderr };
-        return Report::failed(format!("probe exited unsuccessfully: {detail}"));
-    }
-
-    match serde_json::from_slice::<Report>(&output.stdout) {
-        Ok(report) => report,
-        Err(e) => Report::failed(format!("unreadable probe output: {e}")),
-    }
+    let mut client = http::Client::new(http::Pool(sockets), deadline, BYTE_BUDGET);
+    probe::run(&mut client, &ports, now_ms())
 }
 
 /// Probes every container, in parallel, and pairs each with its report.
 ///
-/// Parallel by process rather than by thread: each probe is a child that must be
-/// single-threaded to call `setns`, so they are all spawned, then all collected.
-/// Nine containers therefore cost roughly one probe's latency, not nine.
+/// One thread per container, so nine containers cost roughly one probe's
+/// latency, not nine. Each thread's namespace work happens in a child it forks,
+/// which starts single-threaded whatever the parent is - that is what `setns`
+/// requires - and each thread is bounded by its container's deadline.
 fn probe_all(containers: &[Container], options: &Options) -> Vec<(Container, Report)> {
-    // Spawning is cheap and the work is in waiting, so a plain sequential
-    // spawn-then-collect would serialise. Use scoped threads purely to overlap
-    // the waiting; each thread's child is still forked single-threaded by the
-    // kernel, which is what setns cares about.
     std::thread::scope(|scope| {
         let handles: Vec<_> = containers
             .iter()
@@ -253,6 +253,9 @@ fn select_instance<'a>(
 }
 
 /// Renders the diagnostic table.
+///
+/// Names and reasons are passed through [`render::printable`]: a reason can quote
+/// text a container's server sent back, and this goes to a terminal.
 fn render_list(results: &[(Container, Report)], now: i64) -> String {
     let mut out = String::new();
     for (container, report) in results {
@@ -262,11 +265,11 @@ fn render_list(results: &[(Container, Report)], now: i64) -> String {
             _ => "--:--".to_string(),
         };
         let port = report.port.map_or_else(|| "-".to_string(), |p| p.to_string());
-        let note = report.reason.as_deref().unwrap_or("");
+        let note = render::printable(report.reason.as_deref().unwrap_or(""));
         out.push_str(&format!(
             "{:>2}  {:<24} {:<8} {:<6} pid={:<8} port={:<6} {}\n",
             container.slot,
-            container.name,
+            render::printable(&container.name),
             state,
             age,
             container.pid.unwrap_or(0),
@@ -284,13 +287,6 @@ fn run(options: Options) -> Result<String, String> {
     match &options.mode {
         Mode::Help => Ok(USAGE.to_string()),
         Mode::Version => Ok(format!("{PROGRAM} {}\n", env!("CARGO_PKG_VERSION"))),
-
-        Mode::Probe => {
-            let report = probe::run(options.port, options.timeout, now);
-            let json = serde_json::to_string(&report)
-                .map_err(|e| format!("cannot serialise report: {e}"))?;
-            Ok(format!("{json}\n"))
-        }
 
         Mode::Counts => {
             let containers = discover::discover()?;
@@ -400,7 +396,8 @@ mod tests {
     #[test]
     fn parses_other_modes() {
         assert!(matches!(parse_args(&args(&["--list"])).unwrap().mode, Mode::List));
-        assert!(matches!(parse_args(&args(&["__probe"])).unwrap().mode, Mode::Probe));
+        // The internal re-exec mode of earlier versions is gone for good.
+        assert!(parse_args(&args(&["__probe"])).is_err());
         assert!(matches!(parse_args(&args(&["--help"])).unwrap().mode, Mode::Help));
         assert!(matches!(parse_args(&args(&["-h"])).unwrap().mode, Mode::Help));
         assert!(matches!(parse_args(&args(&["--version"])).unwrap().mode, Mode::Version));
@@ -527,7 +524,16 @@ mod tests {
         assert!(lines[1].contains("no listening socket"));
     }
 
-    /// An empty table is empty output, not a header with nothing under it.
+    /// Escape sequences in a name or reason cannot reach the terminal.
+    #[test]
+    fn list_neutralises_control_characters() {
+        let mut row = pair(1, "opencode-\u{1b}[2J", None);
+        row.1 = Report::failed("bad \u{1b}]0;title\u{7}");
+        let out = render_list(&[row], 1790308945355);
+        assert!(!out.contains('\u{1b}') && !out.contains('\u{7}'), "{out:?}");
+    }
+
+        /// An empty table is empty output, not a header with nothing under it.
     #[test]
     fn list_of_nothing_is_empty() {
         assert_eq!(render_list(&[], 1790308945355), "");

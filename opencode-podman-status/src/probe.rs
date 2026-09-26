@@ -1,21 +1,21 @@
-//! The probe: what runs *inside* a container's namespaces.
+//! The probe: querying one opencode instance and classifying it.
 //!
-//! The parent process forks, moves the child into the target container's user
-//! and network namespaces, then re-executes this program with `__probe`. At that
-//! point `127.0.0.1` is the container's loopback, so opencode's server is
-//! reachable exactly as it would be from inside the container.
+//! Runs in the main process, which never changes namespace. The requests travel
+//! over sockets that were created inside the container's network namespace (see
+//! [`crate::ns_socket`]), so `127.0.0.1` on them is the container's loopback,
+//! but every byte of every response is handled out here. The ports asked about
+//! are only ever ones established by socket ownership (see [`crate::sockets`])
+//! or named explicitly by the user.
 //!
-//! The child finds the port opencode itself is listening on - by socket
-//! ownership, never by trying ports, see [`crate::sockets`] - queries opencode,
-//! and writes a single JSON line to stdout for the parent to collect.
+//! The server is treated as untrusted: its answers are bounded in time and size
+//! by the [`Client`], and nothing taken from one response reaches the next
+//! request's path unless it passes [`is_safe_id`].
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::http;
-use crate::sockets::{self, Discovery};
+use crate::http::{Client, Connect};
 use crate::status::{Observation, State};
 
 /// Most busy sessions to interrogate for a turn start time.
@@ -115,28 +115,20 @@ impl MessageEntry {
     }
 }
 
-/// Runs the probe against `port`, or finds opencode's own port if `port` is `None`.
+/// Runs the probe against the given candidate ports, in order.
 ///
 /// Always returns a [`Report`]: failures are reported, not raised, because the
-/// parent needs to render something for every container.
+/// caller needs to render something for every container.
 ///
-/// Without an explicit port, only ports held by an opencode process are ever
-/// connected to. Other servers in the container are never contacted - an earlier
-/// version sent each of them a health check and they logged errors about it.
-pub fn run(port: Option<u16>, timeout: Duration, now_ms: i64) -> Report {
-    let candidates = match port {
-        Some(p) => vec![p],
-        None => match sockets::discover() {
-            Discovery::Found(ports) => ports,
-            other => return Report::failed(other.reason()),
-        },
-    };
-
+/// `ports` must already be known to belong to opencode (or be the user's own
+/// explicit choice): other servers in the container are never contacted - an
+/// earlier version sent each of them a health check and they logged errors.
+pub fn run<C: Connect>(client: &mut Client<C>, ports: &[u16], now_ms: i64) -> Report {
     // Normally exactly one. Several means opencode holds more than one listener,
     // all of them its own, so asking each is safe.
     let mut last_error = None;
-    for candidate in candidates {
-        match probe_one(candidate, timeout, now_ms) {
+    for &candidate in ports {
+        match probe_one(client, candidate, now_ms) {
             Ok(report) => return report,
             Err(e) => last_error = Some(e),
         }
@@ -144,17 +136,17 @@ pub fn run(port: Option<u16>, timeout: Duration, now_ms: i64) -> Report {
     Report::failed(last_error.unwrap_or_else(|| "opencode did not answer".to_string()))
 }
 
-/// Queries one candidate port, confirming it is opencode before trusting it.
-fn probe_one(port: u16, timeout: Duration, now_ms: i64) -> Result<Report, String> {
+/// Queries one candidate port.
+fn probe_one<C: Connect>(client: &mut Client<C>, port: u16, now_ms: i64) -> Result<Report, String> {
     // A cheap liveness check before the real requests. The port is already known
     // to be opencode's, so this only guards against it still starting up.
-    http::get(port, "/global/health", timeout).map_err(|e| format!("port {port}: {e}"))?;
+    client.get(port, "/global/health").map_err(|e| format!("port {port}: {e}"))?;
 
     let statuses: HashMap<String, crate::status::SessionStatus> =
-        fetch_json(port, "/session/status", timeout)?;
-    let questions: Vec<crate::status::PendingRequest> = fetch_json(port, "/question", timeout)?;
+        fetch_json(client, port, "/session/status")?;
+    let questions: Vec<crate::status::PendingRequest> = fetch_json(client, port, "/question")?;
     let permissions: Vec<crate::status::PendingRequest> =
-        fetch_json(port, "/permission", timeout)?;
+        fetch_json(client, port, "/permission")?;
 
     let observation = Observation { statuses, questions, permissions };
     let state = observation.state();
@@ -162,8 +154,8 @@ fn probe_one(port: u16, timeout: Duration, now_ms: i64) -> Result<Report, String
     let since_ms = match state {
         // Free: the oldest pending request's ID encodes when it was created.
         State::Wait => observation.wait_since_ms(now_ms),
-        State::Run => busy_since_ms(port, &observation, timeout, now_ms),
-        State::Done => idle_since_ms(port, timeout, now_ms),
+        State::Run => busy_since_ms(client, port, &observation, now_ms),
+        State::Done => idle_since_ms(client, port, now_ms),
     };
 
     Ok(Report {
@@ -175,12 +167,12 @@ fn probe_one(port: u16, timeout: Duration, now_ms: i64) -> Result<Report, String
 }
 
 /// Fetches and deserialises one endpoint.
-fn fetch_json<T: serde::de::DeserializeOwned>(
+fn fetch_json<T: serde::de::DeserializeOwned, C: Connect>(
+    client: &mut Client<C>,
     port: u16,
     path: &str,
-    timeout: Duration,
 ) -> Result<T, String> {
-    let body = http::get(port, path, timeout).map_err(|e| format!("GET {path}: {e}"))?;
+    let body = client.get(port, path).map_err(|e| format!("GET {path}: {e}"))?;
     serde_json::from_slice(&body).map_err(|e| format!("GET {path}: bad JSON: {e}"))
 }
 
@@ -188,16 +180,19 @@ fn fetch_json<T: serde::de::DeserializeOwned>(
 ///
 /// Asks each busy session for its most recent message and takes the oldest such
 /// start, so the figure means "how long has this container been busy".
-fn busy_since_ms(
+///
+/// Session IDs come from the server's own response and are about to be put into
+/// a request path, so any that are not plainly an ID are skipped.
+fn busy_since_ms<C: Connect>(
+    client: &mut Client<C>,
     port: u16,
     observation: &Observation,
-    timeout: Duration,
     now_ms: i64,
 ) -> Option<i64> {
     let mut busy: Vec<&String> = observation
         .statuses
         .iter()
-        .filter(|(_, s)| matches!(s.kind.as_str(), "busy" | "retry"))
+        .filter(|(id, s)| matches!(s.kind.as_str(), "busy" | "retry") && is_safe_id(id))
         .map(|(id, _)| id)
         .collect();
     // Deterministic sampling order, so repeated runs agree when capped.
@@ -205,8 +200,18 @@ fn busy_since_ms(
 
     busy.into_iter()
         .take(MAX_BUSY_SESSIONS_SAMPLED)
-        .filter_map(|id| latest_message_ms(port, id, timeout, now_ms))
+        .filter_map(|id| latest_message_ms(client, port, id, now_ms))
         .min()
+}
+
+/// True if a server-supplied ID is safe to embed in a request path.
+///
+/// opencode IDs are a short prefix, an underscore and alphanumerics
+/// (`ses_f2948c7fdffe1r7f03mBfBRLsy`). Anything else - above all anything with
+/// `/`, `?`, `%`, whitespace or control characters - could redirect the request
+/// elsewhere on the API, so it is refused rather than escaped.
+pub fn is_safe_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// Creation time of a session's most recent message.
@@ -216,16 +221,21 @@ fn busy_since_ms(
 /// far newer than the session's own `time.created`. The result is sanity-checked
 /// against the clock regardless, so a future change in ordering would show an
 /// unknown duration rather than a fabricated one.
-fn latest_message_ms(port: u16, session: &str, timeout: Duration, now_ms: i64) -> Option<i64> {
+fn latest_message_ms<C: Connect>(
+    client: &mut Client<C>,
+    port: u16,
+    session: &str,
+    now_ms: i64,
+) -> Option<i64> {
     let path = format!("/session/{session}/message?limit=1");
-    let entries: Vec<MessageEntry> = fetch_json(port, &path, timeout).ok()?;
+    let entries: Vec<MessageEntry> = fetch_json(client, port, &path).ok()?;
     let created = entries.first()?.created_ms()?;
     plausible_past(created, now_ms)
 }
 
 /// When the instance last did anything, for an idle instance.
-fn idle_since_ms(port: u16, timeout: Duration, now_ms: i64) -> Option<i64> {
-    let sessions: Vec<SessionRecord> = fetch_json(port, "/session", timeout).ok()?;
+fn idle_since_ms<C: Connect>(client: &mut Client<C>, port: u16, now_ms: i64) -> Option<i64> {
+    let sessions: Vec<SessionRecord> = fetch_json(client, port, "/session").ok()?;
     sessions
         .iter()
         .filter_map(|s| s.time.updated.or(s.time.created))
@@ -250,6 +260,146 @@ fn plausible_past(ms: i64, now_ms: i64) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::Loopback;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{Ipv4Addr, TcpListener};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// A fake opencode on loopback that answers from a route table and records
+    /// every request path it receives, for as long as the test runs.
+    fn fake_server(routes: Vec<(&'static str, String)>) -> (u16, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for sock in listener.incoming() {
+                let Ok(mut sock) = sock else { break };
+                let mut reader = BufReader::new(sock.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                log.lock().unwrap().push(path.clone());
+                let reply = match routes.iter().find(|(p, _)| *p == path) {
+                    Some((_, body)) => format!("HTTP/1.1 200 OK\r\n\r\n{body}"),
+                    None => "HTTP/1.1 404 Not Found\r\n\r\n".to_string(),
+                };
+                let _ = sock.write_all(reply.as_bytes());
+            }
+        });
+        (port, seen)
+    }
+
+    /// A loopback client with the program's normal limits.
+    fn client() -> Client<Loopback> {
+        Client::new(Loopback, Instant::now() + Duration::from_secs(5), 4 * crate::http::MAX_RESPONSE)
+    }
+
+    /// Real opencode IDs are accepted as safe path components.
+    #[test]
+    fn accepts_real_ids() {
+        for id in ["ses_f2948c7fdffe1r7f03mBfBRLsy", "msg_0d6c75ea3001xwhRotcmNTvdqj", "a"] {
+            assert!(is_safe_id(id), "{id}");
+        }
+    }
+
+    /// IDs that could steer a request elsewhere on the API are refused.
+    #[test]
+    fn refuses_ids_that_could_redirect_a_request() {
+        for id in [
+            "",
+            "../permission",
+            "ses_x/../../auth",
+            "ses_x?directory=/",
+            "ses_x%2F",
+            "ses_x\r\nX: y",
+            "ses x",
+            "ses_\u{e9}",
+            &"a".repeat(65),
+        ] {
+            assert!(!is_safe_id(id), "should refuse {id:?}");
+        }
+    }
+
+    /// End to end: an idle instance is classified `done`, and its age comes
+    /// from the newest session's `updated` time.
+    #[test]
+    fn classifies_idle_instance_end_to_end() {
+        let now = 1790308945355;
+        let (port, seen) = fake_server(vec![
+            ("/global/health", r#"{"healthy":true}"#.into()),
+            ("/session/status", "{}".into()),
+            ("/question", "[]".into()),
+            ("/permission", "[]".into()),
+            ("/session", format!(r#"[{{"time":{{"created":1,"updated":{}}}}}]"#, now - 60_000)),
+        ]);
+        let report = run(&mut client(), &[port], now);
+        assert_eq!(report.parsed_state(), Some(State::Done));
+        assert_eq!(report.since_ms, Some(now - 60_000));
+        assert_eq!(report.port, Some(port));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["/global/health", "/session/status", "/question", "/permission", "/session"]
+        );
+    }
+
+    /// A busy session with a hostile ID is not used to build a request path;
+    /// the instance is still reported as running, just with an unknown age.
+    #[test]
+    fn hostile_session_id_never_reaches_a_request() {
+        let (port, seen) = fake_server(vec![
+            ("/global/health", "{}".into()),
+            ("/session/status", r#"{"../../auth/x?":{"type":"busy"}}"#.into()),
+            ("/question", "[]".into()),
+            ("/permission", "[]".into()),
+        ]);
+        let report = run(&mut client(), &[port], 1790308945355);
+        assert_eq!(report.parsed_state(), Some(State::Run));
+        assert_eq!(report.since_ms, None);
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().all(|p| !p.contains("auth")), "requests: {seen:?}");
+        assert_eq!(seen.len(), 4, "requests: {seen:?}");
+    }
+
+    /// A safe busy session's latest message supplies the running age.
+    #[test]
+    fn busy_age_comes_from_latest_message() {
+        let now = 1790308945355;
+        let (port, _) = fake_server(vec![
+            ("/global/health", "{}".into()),
+            ("/session/status", r#"{"ses_abc":{"type":"busy"}}"#.into()),
+            ("/question", "[]".into()),
+            ("/permission", "[]".into()),
+            (
+                "/session/ses_abc/message?limit=1",
+                format!(r#"[{{"info":{{"time":{{"created":{}}}}},"parts":[]}}]"#, now - 5_000),
+            ),
+        ]);
+        let report = run(&mut client(), &[port], now);
+        assert_eq!(report.parsed_state(), Some(State::Run));
+        assert_eq!(report.since_ms, Some(now - 5_000));
+    }
+
+    /// An unreachable candidate is reported with its port, not as a panic.
+    #[test]
+    fn unreachable_port_is_a_failed_report() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let report = run(&mut client(), &[port], 0);
+        assert_eq!(report.parsed_state(), None);
+        assert!(report.reason.unwrap().contains(&format!("port {port}")));
+    }
+
+    /// With no candidates at all there is still a report, not a panic.
+    #[test]
+    fn no_candidates_is_a_failed_report() {
+        let report = run(&mut client(), &[], 0);
+        assert!(report.reason.is_some());
+    }
 
     /// The real `{info, parts}` entry captured from opencode 1.18.32 for
     /// `GET /session/{id}/message?limit=1`, trimmed of the parts payload.

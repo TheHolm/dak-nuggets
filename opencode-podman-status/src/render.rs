@@ -40,9 +40,20 @@ pub fn counts(counts: Counts) -> String {
     )
 }
 
+/// Replaces control characters with `?`.
+///
+/// Container names and failure reasons can carry text that originated inside a
+/// container. None of today's sources can contain control characters, but
+/// printing one to a terminal could rewrite what the user sees (ANSI escapes),
+/// so everything displayed goes through here regardless.
+pub fn printable(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
+}
+
 /// Shortens a container name for display.
 ///
-/// Strips a leading `opencode-` and truncates to six characters. A bare
+/// Strips a leading `opencode-`, neutralises control characters, and truncates
+/// to six characters. A bare
 /// `opencode` has no prefix to strip and so renders as `openco`; collisions with
 /// names like `opencode-openconnect` are accepted deliberately, as six
 /// characters cannot disambiguate everything.
@@ -51,7 +62,7 @@ pub fn short_name(container: &str) -> String {
     // A name of exactly "opencode-" would strip to nothing; fall back to the
     // original so the line is never blank.
     let base = if stripped.is_empty() { container } else { stripped };
-    truncate(base, WIDTH)
+    truncate(&printable(base), WIDTH)
 }
 
 /// Truncates to at most `max` characters, respecting character boundaries.
@@ -227,6 +238,15 @@ mod tests {
         let out = instance("opencode-api", Some(State::Wait), None, now);
         assert_eq!(out, "api\nwait\n--:--\n");
         assert_fits(&out);
+    }
+
+    /// Control characters, including the ESC that starts a terminal escape
+    /// sequence, never survive into displayed text.
+    #[test]
+    fn neutralises_control_characters() {
+        assert_eq!(printable("ok\u{1b}[2Jgone\r\n\t"), "ok?[2Jgone???");
+        assert_eq!(printable("plain \u{e9}"), "plain \u{e9}");
+        assert_eq!(short_name("opencode-\u{1b}[31m"), "?[31m");
     }
 
     /// Every state word renders within the button width.

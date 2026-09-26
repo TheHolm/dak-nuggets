@@ -2,8 +2,8 @@
 //!
 //! Every request this program makes is a plain GET to `127.0.0.1` *inside* a
 //! container's network namespace. That makes almost everything a general HTTP
-//! client handles irrelevant: no TLS, no redirects, no proxies, no
-//! authentication, no keep-alive pooling.
+//! client handles irrelevant: no TLS, no redirects, no proxies, no keep-alive
+//! pooling.
 //!
 //! Sending `Connection: close` means the server closes the socket when the body
 //! is complete, so the body is simply "everything until EOF". That removes the
@@ -11,18 +11,33 @@
 //! entirely. Verified against opencode 1.18.32, which honours it and replies
 //! with `Content-Length` and no chunking - see NOTES.md.
 //!
+//! # The peer is not trusted
+//!
+//! The server on the other end runs inside a container whose agent can run
+//! arbitrary commands, so it may be anything. Hence:
+//!
+//! * a [`Client`] has one absolute **deadline** shared by all its requests,
+//!   checked before every read and write, so a server that drips one byte at a
+//!   time cannot hold the caller past it (per-read timeouts alone would allow
+//!   that indefinitely);
+//! * each response is capped at [`MAX_RESPONSE`] and all of a client's responses
+//!   together at its byte budget, so memory use per container is bounded;
+//! * request paths are validated ([`validate_path`]) so that data taken from one
+//!   response can never smuggle extra request lines or headers into the next.
+//!
 //! Pulling in a full HTTP client crate would have added eight transitive
 //! dependencies to do less than this file does.
 
-use std::io::{Read, Write};
-use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
-use std::time::Duration;
+use std::io::{self, Read, Write};
+use std::net::{Ipv4Addr, TcpStream};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::time::{Duration, Instant};
 
-/// Largest response body accepted, as a guard against a runaway peer.
+/// Largest single response accepted, headers included.
 ///
-/// Session lists on a busy instance are the biggest thing we fetch and are
-/// nowhere near this.
-const MAX_BODY: usize = 8 * 1024 * 1024;
+/// Session lists on a busy instance are the biggest thing fetched and are far
+/// below this.
+pub const MAX_RESPONSE: usize = 1024 * 1024;
 
 /// Why a request failed. Deliberately coarse: the caller only ever turns this
 /// into "instance unreachable", but the text reaches `--list` for diagnosis.
@@ -37,44 +52,230 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error(e.to_string())
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
+        match e.kind() {
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => Error("timed out".into()),
+            _ => Error(e.to_string()),
+        }
     }
 }
 
-/// Performs `GET path` against `127.0.0.1:port` and returns the response body.
+/// Something that yields a TCP connection to `127.0.0.1:<port>`.
 ///
-/// `timeout` bounds connect, read and write independently, so a wedged instance
-/// cannot stall the caller: DAK re-invokes this program on a timer and must never
-/// be left waiting.
+/// The real implementation hands out sockets created inside a container's
+/// network namespace (see [`crate::ns_socket`]); tests use [`Loopback`], which
+/// connects in this process's own namespace.
+pub trait Connect {
+    /// Connects to `127.0.0.1:port`, giving up at `deadline`.
+    fn connect(&mut self, port: u16, deadline: Instant) -> io::Result<TcpStream>;
+}
+
+/// Connects in the caller's own network namespace. Test-only: the program
+/// itself always connects through sockets from the container's namespace.
+#[cfg(test)]
+pub struct Loopback;
+
+#[cfg(test)]
+impl Connect for Loopback {
+    /// A plain loopback connection, bounded by the deadline.
+    fn connect(&mut self, port: u16, deadline: Instant) -> io::Result<TcpStream> {
+        let remaining = remaining(deadline)?;
+        TcpStream::connect_timeout(&std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into(), remaining)
+    }
+}
+
+/// Sockets created elsewhere - in a container's namespace - used once each.
 ///
-/// Fails if the status line is not 200, since every endpoint used here returns
-/// 200 on success and there is nothing useful to do with another code.
-pub fn get(port: u16, path: &str, timeout: Duration) -> Result<Vec<u8>, Error> {
-    let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
-    let mut stream = TcpStream::connect_timeout(&addr.into(), timeout)?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
-    stream.set_nodelay(true)?;
+/// Running out is an error rather than a reason to fetch more: the pool size is
+/// the cap on how many requests one container can cost.
+pub struct Pool(pub Vec<OwnedFd>);
 
-    let request = format!(
-        "GET {path} HTTP/1.1\r\n\
-         Host: 127.0.0.1:{port}\r\n\
-         Accept: application/json\r\n\
-         User-Agent: opencode-podman-status\r\n\
-         Connection: close\r\n\
-         \r\n"
-    );
-    stream.write_all(request.as_bytes())?;
-    stream.flush()?;
+impl Connect for Pool {
+    /// Connects the next unused socket.
+    fn connect(&mut self, port: u16, deadline: Instant) -> io::Result<TcpStream> {
+        let fd = self
+            .0
+            .pop()
+            .ok_or_else(|| io::Error::other("request budget exhausted"))?;
+        connect_socket(fd, port, deadline)
+    }
+}
 
+/// Time left before `deadline`, or a timeout error if none.
+fn remaining(deadline: Instant) -> io::Result<Duration> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        Err(io::Error::new(io::ErrorKind::TimedOut, "timed out"))
+    } else {
+        Ok(left)
+    }
+}
+
+/// Connects an existing, unconnected IPv4 TCP socket to `127.0.0.1:port`.
+///
+/// Whatever network namespace the socket was created in is the one whose
+/// loopback it reaches. The connect is non-blocking and waited on with `poll`
+/// so it respects the deadline; the socket is returned to blocking mode after.
+pub fn connect_socket(fd: OwnedFd, port: u16, deadline: Instant) -> io::Result<TcpStream> {
+    let raw = fd.as_raw_fd();
+    set_nonblocking(raw, true)?;
+
+    let addr = libc::sockaddr_in {
+        sin_family: libc::AF_INET as libc::sa_family_t,
+        sin_port: port.to_be(),
+        sin_addr: libc::in_addr { s_addr: u32::from(Ipv4Addr::LOCALHOST).to_be() },
+        sin_zero: [0; 8],
+    };
+    // SAFETY: `addr` is a valid sockaddr_in of the length passed.
+    let r = unsafe {
+        libc::connect(
+            raw,
+            &addr as *const libc::sockaddr_in as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+        )
+    };
+    if r != 0 {
+        let e = io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::EINPROGRESS) {
+            return Err(e);
+        }
+        crate::ns_socket::wait_for(raw, libc::POLLOUT, deadline)?;
+        let mut err: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: SO_ERROR writes one c_int into `err`.
+        let r = unsafe {
+            libc::getsockopt(
+                raw,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                &mut err as *mut libc::c_int as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if r != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if err != 0 {
+            return Err(io::Error::from_raw_os_error(err));
+        }
+    }
+    set_nonblocking(raw, false)?;
+    Ok(TcpStream::from(fd))
+}
+
+/// Sets or clears `O_NONBLOCK` on a descriptor.
+fn set_nonblocking(fd: i32, on: bool) -> io::Result<()> {
+    // SAFETY: F_GETFL/F_SETFL on a descriptor we own.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let flags = if on { flags | libc::O_NONBLOCK } else { flags & !libc::O_NONBLOCK };
+        if libc::fcntl(fd, libc::F_SETFL, flags) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// Checks a request path is safe to put on the request line.
+///
+/// Only printable ASCII without spaces is allowed, and it must start with `/`.
+/// That excludes CR and LF, so nothing can terminate the request line early and
+/// inject headers or a second request - which matters because some paths are
+/// built from data the (untrusted) server itself returned.
+pub fn validate_path(path: &str) -> Result<(), Error> {
+    if !path.starts_with('/') {
+        return Err(Error(format!("refusing request path not starting with '/': {path:?}")));
+    }
+    if !path.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+        return Err(Error(format!("refusing unsafe request path: {path:?}")));
+    }
+    Ok(())
+}
+
+/// Makes GET requests against one opencode instance within a fixed budget.
+///
+/// All requests share one deadline and one byte budget, so however the peer
+/// behaves, one container costs at most that much time and memory.
+pub struct Client<C: Connect> {
+    connector: C,
+    deadline: Instant,
+    bytes_left: usize,
+}
+
+impl<C: Connect> Client<C> {
+    /// A client that must finish every request by `deadline` and may read at
+    /// most `byte_budget` bytes in total.
+    pub fn new(connector: C, deadline: Instant, byte_budget: usize) -> Self {
+        Client { connector, deadline, bytes_left: byte_budget }
+    }
+
+    /// Performs `GET path` against `127.0.0.1:port` and returns the response body.
+    ///
+    /// Fails if the status line is not 200, since every endpoint used here returns
+    /// 200 on success and there is nothing useful to do with another code.
+    pub fn get(&mut self, port: u16, path: &str) -> Result<Vec<u8>, Error> {
+        validate_path(path)?;
+        let mut stream = self.connector.connect(port, self.deadline)?;
+        stream.set_nodelay(true)?;
+
+        let request = format!(
+            "GET {path} HTTP/1.1\r\n\
+             Host: 127.0.0.1:{port}\r\n\
+             Accept: application/json\r\n\
+             User-Agent: opencode-podman-status\r\n\
+             Connection: close\r\n\
+             \r\n"
+        );
+        stream.set_write_timeout(Some(remaining(self.deadline)?))?;
+        stream.write_all(request.as_bytes())?;
+        stream.flush()?;
+
+        let limit = MAX_RESPONSE.min(self.bytes_left);
+        let raw = read_bounded(&mut stream, self.deadline, limit)?;
+        self.bytes_left -= raw.len();
+        split_response(&raw)
+    }
+}
+
+/// Reads until EOF, failing at `deadline` or once more than `limit` bytes arrive.
+///
+/// The deadline is re-applied before every read, which is what bounds the total
+/// time rather than just the gap between packets.
+fn read_bounded<R: Read + ReadTimeout>(stream: &mut R, deadline: Instant, limit: usize) -> Result<Vec<u8>, Error> {
     let mut raw = Vec::new();
-    // Bound the read so a peer that never closes cannot exhaust memory.
-    let mut limited = stream.take(MAX_BODY as u64);
-    limited.read_to_end(&mut raw)?;
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        stream.set_timeout(remaining(deadline)?)?;
+        match stream.read(&mut chunk) {
+            Ok(0) => return Ok(raw),
+            Ok(n) => {
+                if raw.len() + n > limit {
+                    return Err(Error(format!("response larger than {limit} bytes")));
+                }
+                raw.extend_from_slice(&chunk[..n]);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
 
-    split_response(&raw)
+/// A readable stream whose read timeout can be set, so [`read_bounded`] can be
+/// exercised against both real sockets and test doubles.
+trait ReadTimeout {
+    /// Sets the timeout for the next read.
+    fn set_timeout(&mut self, timeout: Duration) -> io::Result<()>;
+}
+
+impl ReadTimeout for TcpStream {
+    /// Delegates to the socket's own read timeout.
+    fn set_timeout(&mut self, timeout: Duration) -> io::Result<()> {
+        self.set_read_timeout(Some(timeout))
+    }
 }
 
 /// Splits a raw HTTP response into its body, checking the status line.
@@ -141,6 +342,35 @@ mod tests {
         \r\n\
         {\"healthy\":true,\"version\":\"1.18.32\"}";
 
+    /// A client over plain loopback with a generous budget, for tests.
+    fn client(timeout: Duration) -> Client<Loopback> {
+        Client::new(Loopback, Instant::now() + timeout, 4 * MAX_RESPONSE)
+    }
+
+    /// Serves one connection with `respond`, returning the request head it read.
+    fn serve_once<F>(respond: F) -> (u16, thread::JoinHandle<String>)
+    where
+        F: FnOnce(&mut TcpStream) + Send + 'static,
+    {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut reader = std::io::BufReader::new(sock.try_clone().unwrap());
+            let mut head = String::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                head.push_str(&line);
+            }
+            respond(&mut sock);
+            head
+        });
+        (port, handle)
+    }
+
     /// The real captured response parses to exactly its JSON body.
     #[test]
     fn parses_real_opencode_response() {
@@ -195,41 +425,117 @@ mod tests {
         assert_eq!(String::from_utf8(body).unwrap(), "{\"a\":\"x\\r\\n\\r\\ny\"}");
     }
 
+    /// Ordinary API paths, including query strings, are accepted.
+    #[test]
+    fn accepts_ordinary_paths() {
+        for path in ["/global/health", "/session/status", "/session/ses_abc123/message?limit=1"] {
+            assert!(validate_path(path).is_ok(), "{path}");
+        }
+    }
+
+    /// Anything that could end the request line early or smuggle headers is
+    /// refused: CR, LF, spaces, other control characters and non-ASCII.
+    #[test]
+    fn refuses_injection_in_paths() {
+        for path in [
+            "/session/x\r\nX-Injected: 1",
+            "/session/x\n",
+            "/session/x HTTP/1.1",
+            "/session/\u{0}",
+            "/session/\t",
+            "/session/\u{7f}",
+            "/session/\u{e9}",
+            "session/no-leading-slash",
+            "",
+        ] {
+            assert!(validate_path(path).is_err(), "should refuse {path:?}");
+        }
+    }
+
+    /// An unsafe path is refused before any connection is made.
+    #[test]
+    fn get_refuses_unsafe_path_without_connecting() {
+        /// A connector that fails the test if used.
+        struct MustNotConnect;
+        impl Connect for MustNotConnect {
+            /// Panics: validation should have stopped the request first.
+            fn connect(&mut self, _: u16, _: Instant) -> io::Result<TcpStream> {
+                panic!("connected despite an unsafe path");
+            }
+        }
+        let mut c = Client::new(MustNotConnect, Instant::now() + Duration::from_secs(1), 1024);
+        assert!(c.get(1, "/x\r\nHost: evil").is_err());
+    }
+
     /// End-to-end against a real socket: confirms the request line, the headers
     /// we promise to send, and that the body comes back intact.
     #[test]
     fn performs_a_real_request_over_tcp() {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
-        let port = listener.local_addr().unwrap().port();
-
-        let server = thread::spawn(move || {
-            let (mut sock, _) = listener.accept().expect("accept");
-            // Read the request head so we can assert on it.
-            let mut reader = std::io::BufReader::new(sock.try_clone().unwrap());
-            let mut head = String::new();
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
-                    break;
-                }
-                head.push_str(&line);
-            }
+        let (port, server) = serve_once(|sock| {
             sock.write_all(REAL_HEALTH_RESPONSE).unwrap();
-            // Closing is what signals end-of-body to the client.
-            drop(sock);
-            head
         });
-
-        let body = get(port, "/global/health", Duration::from_secs(5)).expect("request");
+        let body = client(Duration::from_secs(5)).get(port, "/global/health").expect("request");
         assert_eq!(
             String::from_utf8(body).unwrap(),
             "{\"healthy\":true,\"version\":\"1.18.32\"}"
         );
-
         let head = server.join().expect("server thread");
         assert!(head.starts_with("GET /global/health HTTP/1.1\r\n"), "head: {head:?}");
         assert!(head.contains("Connection: close\r\n"), "head: {head:?}");
         assert!(head.contains(&format!("Host: 127.0.0.1:{port}\r\n")), "head: {head:?}");
+    }
+
+    /// A server that trickles bytes forever is cut off at the deadline, even
+    /// though every individual read succeeds well within any per-read timeout.
+    #[test]
+    fn slow_drip_server_hits_the_overall_deadline() {
+        let (port, _server) = serve_once(|sock| {
+            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\n\r\n");
+            for _ in 0..100 {
+                if sock.write_all(b" ").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let started = Instant::now();
+        let err = client(Duration::from_millis(400))
+            .get(port, "/global/health")
+            .expect_err("should time out");
+        assert_eq!(err.to_string(), "timed out");
+        assert!(started.elapsed() < Duration::from_secs(2), "took {:?}", started.elapsed());
+    }
+
+    /// A response over the per-response cap is refused, not truncated and parsed.
+    #[test]
+    fn oversized_response_is_refused() {
+        let (port, _server) = serve_once(|sock| {
+            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\n\r\n");
+            let chunk = vec![b'x'; 64 * 1024];
+            for _ in 0..(MAX_RESPONSE / chunk.len() + 2) {
+                if sock.write_all(&chunk).is_err() {
+                    break;
+                }
+            }
+        });
+        let err = client(Duration::from_secs(5)).get(port, "/big").expect_err("too big");
+        assert!(err.to_string().contains("larger than"), "{err}");
+    }
+
+    /// The byte budget spans requests: once spent, even a small response fails.
+    #[test]
+    fn byte_budget_is_shared_across_requests() {
+        let respond = |sock: &mut TcpStream| {
+            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\n\r\n0123456789");
+        };
+        let mut c = Client::new(Loopback, Instant::now() + Duration::from_secs(5), 40);
+        let (port, s) = serve_once(respond);
+        assert!(c.get(port, "/a").is_ok());
+        s.join().unwrap();
+        let (port, s) = serve_once(respond);
+        let err = c.get(port, "/b").expect_err("budget spent");
+        assert!(err.to_string().contains("larger than"), "{err}");
+        let _ = s.join();
     }
 
     /// Connecting to a port with nothing on it fails rather than hanging.
@@ -239,6 +545,47 @@ mod tests {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
-        assert!(get(port, "/global/health", Duration::from_millis(500)).is_err());
+        assert!(client(Duration::from_millis(500)).get(port, "/global/health").is_err());
+    }
+
+    /// A pre-created socket handed in from elsewhere is connected and used, and
+    /// once the pool is empty further requests fail instead of opening more.
+    #[test]
+    fn pool_uses_each_socket_once() {
+        let (port, server) = serve_once(|sock| {
+            sock.write_all(REAL_HEALTH_RESPONSE).unwrap();
+        });
+        // SAFETY: a fresh socket owned by nobody else.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        assert!(fd >= 0);
+        // SAFETY: fd was just created.
+        let fd = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+        let mut c = Client::new(Pool(vec![fd]), Instant::now() + Duration::from_secs(5), MAX_RESPONSE);
+        assert!(c.get(port, "/global/health").is_ok());
+        server.join().unwrap();
+        let err = c.get(port, "/global/health").expect_err("pool empty");
+        assert!(err.to_string().contains("budget exhausted"), "{err}");
+    }
+
+    /// Connecting a pre-created socket to a closed port reports the refusal.
+    #[test]
+    fn connect_socket_reports_refusal() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        // SAFETY: a fresh socket owned by nobody else.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        // SAFETY: fd was just created.
+        let fd = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+        let err = connect_socket(fd, port, Instant::now() + Duration::from_secs(2)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused);
+    }
+
+    /// An already-expired deadline fails immediately rather than blocking.
+    #[test]
+    fn expired_deadline_fails_immediately() {
+        let mut c = Client::new(Loopback, Instant::now(), MAX_RESPONSE);
+        let err = c.get(1, "/global/health").expect_err("expired");
+        assert_eq!(err.to_string(), "timed out");
     }
 }

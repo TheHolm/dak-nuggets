@@ -13,12 +13,21 @@
 # puts a fake opencode server inside it, and checks that:
 #
 #   1. the server is NOT reachable from outside the namespace;
-#   2. `--pid` reaches it by entering the namespace, and reports the right state;
-#   3. the port is discovered by socket ownership rather than needing to be told;
+#   2. `--pid` reaches it over a socket created inside the namespace, and
+#      reports the right state;
+#   3. the port is discovered by socket ownership - reading the namespace's
+#      /proc tables from the host - rather than needing to be told;
 #   4. a second, unrelated server in the same namespace is never contacted.
 #
 # Point 4 is a regression test: an earlier version tried every listening port,
 # so other servers in the container received requests and logged errors.
+#
+# Since 0.2.0 nothing of this program runs inside the namespace: a forked child
+# joins it only to create sockets and pass them back (src/ns_socket.rs), and all
+# HTTP happens in the parent. Running this as an unprivileged user is the
+# meaningful case, e.g.:
+#
+#     setpriv --reuid=1000 --regid=1000 --clear-groups sh tests/namespace-entry.sh
 #
 # The same shape as the manual validation recorded in NOTES.md, which additionally
 # confirmed this works as an unprivileged user (the case that matters for rootless
