@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use discover::Container;
-use probe::Report;
+use probe::{Report, Source};
 use sockets::Discovery;
 use status::{Counts, State};
 
@@ -95,6 +95,10 @@ struct Options {
     mode: Mode,
     /// Skip port discovery and use this port.
     port: Option<u16>,
+    /// Which kind of server to take the state from.
+    source: Source,
+    /// Port the status plugin listens on inside each container.
+    plugin_port: u16,
     timeout: Duration,
     /// Password for opencode's server, if it was started with one.
     password: Option<PasswordSource>,
@@ -109,6 +113,8 @@ impl Default for Options {
         Options {
             mode: Mode::Counts,
             port: None,
+            source: Source::Auto,
+            plugin_port: probe::DEFAULT_PLUGIN_PORT,
             timeout: DEFAULT_TIMEOUT,
             password: None,
             username: None,
@@ -125,15 +131,23 @@ Reports what each opencode instance running in a rootless podman container is
 doing. With no options, prints three six-character lines for a DAK button:
 
     run: 3      instances working
-    wait:1      instances waiting for an answer from you
+    wait:1      instances waiting for you: a question, a permission
+                prompt, or (status plugin only) a failed turn
     done:5      instances idle
 
 Options:
-  --instance <slot|name>  Detail for one container: name, state, time in state.
-                          Prints nothing at all if that slot does not exist.
+  --instance <slot|name>  Detail for one container: name, state (run, wait,
+                          done, or Error), time in state. Prints nothing at
+                          all if that slot does not exist.
   --list                  Diagnostic table of every container (not for DAK).
   --pid <n>               Diagnostic: probe this process's namespaces directly,
                           bypassing podman, and print the raw JSON report.
+  --source <auto|plugin|api>
+                          Take the state from the status plugin, from
+                          opencode's own API, or (auto, the default) from the
+                          plugin when present and the API otherwise.
+  --plugin-port <n>       Port the status plugin listens on (default 4097;
+                          OPENCODE_STATUS_PORT in the container changes it).
   --port <n>              Use this port instead of discovering it.
   --timeout <ms>          Time budget per container, all requests included
                           (default 2500).
@@ -146,11 +160,14 @@ Options:
   -h, --help              This text.
   -V, --version           Version.
 
-Each container must run opencode with an explicit --port, for example
-`opencode --port 4096`; the same port in every container is fine. Setting
-server.port in opencode.json does NOT work - see README.markdown.
+Recommended: enable the status plugin in each container's opencode.json and
+run opencode WITHOUT --port. `opencode --port` exposes opencode's full
+remote-control API, through which anything reaching the port - including the
+agent's own tools in the container - can approve its own permission prompts
+and run commands without any human check. See README.markdown.
 
-Linux only: it works by entering a rootless podman container's namespaces.
+Linux only: it works by creating sockets in rootless podman containers'
+network namespaces.
 ";
 
 /// Parses arguments, hand-rolled to avoid a dependency for six flags.
@@ -180,6 +197,17 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                     return Err(format!("invalid pid: {v}"));
                 }
                 options.mode = Mode::Pid(pid);
+            }
+            "--source" => {
+                let v = value(args, &mut index, "--source")?;
+                options.source = Source::parse(v).ok_or_else(|| format!("invalid source: {v}"))?;
+            }
+            "--plugin-port" => {
+                let v = value(args, &mut index, "--plugin-port")?;
+                options.plugin_port = match v.parse() {
+                    Ok(p) if p != 0 => p,
+                    _ => return Err(format!("invalid plugin port: {v}")),
+                };
             }
             "--port" => {
                 let v = value(args, &mut index, "--port")?;
@@ -268,7 +296,9 @@ fn probe_container(container: &Container, options: &Options) -> Report {
     let ports = match options.port {
         Some(port) => vec![port],
         None => match sockets::discover(pid) {
-            Discovery::Found(ports) => ports,
+            Discovery::Found(ports) => {
+                probe::order_candidates(&ports, options.plugin_port, options.source)
+            }
             other => return Report::failed(other.reason()),
         },
     };
@@ -289,7 +319,7 @@ fn probe_container(container: &Container, options: &Options) -> Report {
 
     let mut client = http::Client::new(http::Pool(sockets), deadline, BYTE_BUDGET)
         .with_credentials(options.credentials.as_ref());
-    probe::run(&mut client, &ports, now_ms())
+    probe::run(&mut client, &ports, options.source, now_ms())
 }
 
 /// Probes every container, in parallel, and pairs each with its report.
@@ -342,15 +372,17 @@ fn render_list(results: &[(Container, Report)], now: i64) -> String {
             _ => "--:--".to_string(),
         };
         let port = report.port.map_or_else(|| "-".to_string(), |p| p.to_string());
+        let source = render::printable(report.source.as_deref().unwrap_or("-"));
         let note = render::printable(report.reason.as_deref().unwrap_or(""));
         out.push_str(&format!(
-            "{:>2}  {:<24} {:<8} {:<6} pid={:<8} port={:<6} {}\n",
+            "{:>2}  {:<24} {:<8} {:<6} pid={:<8} port={:<6} via={:<7} {}\n",
             container.slot,
             render::printable(&container.name),
             state,
             age,
             container.pid.unwrap_or(0),
             port,
+            source,
             note
         ));
     }
@@ -589,6 +621,7 @@ mod tests {
             },
             Report {
                 port: Some(4096),
+                source: Some("plugin".to_string()),
                 state: state.map(|s| s.to_string()),
                 since_ms: Some(1790308945355),
                 reason: None,
@@ -686,11 +719,34 @@ mod tests {
         assert!(version.contains(PROGRAM));
     }
 
-    /// The usage text documents the --port requirement, which is the single most
-    /// common reason the program reports nothing useful.
+    /// The usage text recommends the plugin and warns what `--port` gives away.
     #[test]
-    fn usage_documents_the_port_requirement() {
-        assert!(USAGE.contains("--port 4096"));
-        assert!(USAGE.contains("server.port"));
+    fn usage_warns_about_port_and_recommends_plugin() {
+        assert!(USAGE.contains("status plugin"));
+        assert!(USAGE.contains("WITHOUT --port"));
+        assert!(USAGE.contains("without any human check"));
+    }
+
+    /// `--source` and `--plugin-port` parse, defaulting to auto and 4097.
+    #[test]
+    fn parses_source_options() {
+        let o = parse_args(&args(&[])).unwrap();
+        assert_eq!(o.source, Source::Auto);
+        assert_eq!(o.plugin_port, 4097);
+        let o = parse_args(&args(&["--source", "api", "--plugin-port", "5000"])).unwrap();
+        assert_eq!(o.source, Source::Api);
+        assert_eq!(o.plugin_port, 5000);
+        assert!(parse_args(&args(&["--source", "both"])).is_err());
+        assert!(parse_args(&args(&["--plugin-port", "0"])).is_err());
+        assert!(parse_args(&args(&["--plugin-port", "x"])).is_err());
+        assert!(parse_args(&args(&["--source"])).is_err());
+    }
+
+    /// An errored instance is listed as `error`, with what answered.
+    #[test]
+    fn list_shows_error_and_source() {
+        let out = render_list(&[pair(1, "opencode-web", Some("error"))], 1790308945355);
+        assert!(out.contains(" error "), "{out}");
+        assert!(out.contains("via=plugin"), "{out}");
     }
 }

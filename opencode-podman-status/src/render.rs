@@ -92,16 +92,16 @@ pub fn hhmm(seconds: i64) -> String {
 
 /// Renders the three-line detail view for a single instance.
 ///
-/// `state` is `None` when the container exists but its API could not be reached,
-/// typically because opencode started without `--port` or is still booting; that
-/// shows as `----`. `since_ms` is when the instance entered its current state, and
+/// `state` is `None` when the container exists but could not be probed,
+/// typically because opencode has neither the status plugin nor `--port`, or is
+/// still booting; that shows as `----`. An error shows as `Error`. `since_ms` is when the instance entered its current state, and
 /// `None` shows as `--:--`.
 ///
 /// The case of a slot that does not exist at all is *not* handled here: the
 /// caller prints nothing, so unused DAK buttons stay blank.
 pub fn instance(name: &str, state: Option<State>, since_ms: Option<i64>, now_ms: i64) -> String {
     let state_line = match state {
-        Some(s) => s.word(),
+        Some(s) => s.label(),
         None => UNKNOWN_STATE,
     };
     let time_line = match (state, since_ms) {
@@ -249,11 +249,20 @@ mod tests {
         assert_eq!(short_name("opencode-\u{1b}[31m"), "?[31m");
     }
 
+    /// An errored instance says so, capitalised, on its button.
+    #[test]
+    fn renders_error_instance() {
+        let now = 1790308945355;
+        let out = instance("opencode-web", Some(State::Error), Some(now - 3 * 60_000), now);
+        assert_eq!(out, "web\nError\n00:03\n");
+        assert_fits(&out);
+    }
+
     /// Every state word renders within the button width.
     #[test]
     fn all_states_fit_the_button() {
         let now = 1790308945355;
-        for state in [State::Run, State::Wait, State::Done] {
+        for state in [State::Run, State::Wait, State::Done, State::Error] {
             assert_fits(&instance("opencode-verylongname", Some(state), Some(now), now));
         }
     }

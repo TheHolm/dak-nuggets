@@ -15,6 +15,8 @@
 PREFIX  ?= /usr/local
 DESTDIR ?=
 BIN = target/release/opencode-podman-status
+PLUGIN = plugin/opencode-podman-status.js
+BUN ?= bun
 
 # Prepended to every recipe. Each recipe line runs in its own shell, so the
 # `exit 0` abandons just that line - which is the whole recipe here, since the
@@ -32,8 +34,17 @@ all: build
 build:
 	@$(LINUX_ONLY); cargo build --release
 
+# The status plugin's tests need Bun (https://bun.sh). Without it they are
+# skipped with a message rather than failing the build: nothing in the build or
+# packaging needs Bun, only running these tests does.
 test:
 	@$(LINUX_ONLY); cargo test
+	@$(LINUX_ONLY); \
+	if command -v $(BUN) >/dev/null 2>&1; then \
+		cd plugin && $(BUN) test; \
+	else \
+		echo "opencode-podman-status: bun not found, skipping plugin tests (install Bun to run them)"; \
+	fi
 
 # Coverage summary. discover.rs and main.rs are excluded from the table because
 # they need podman, which unit tests cannot provide; they are covered by hand -
@@ -51,8 +62,9 @@ coverage:
 
 install: build
 	@$(LINUX_ONLY); \
-	mkdir -p "$(DESTDIR)$(PREFIX)/bin"; \
-	install -m 755 $(BIN) "$(DESTDIR)$(PREFIX)/bin/opencode-podman-status"
+	mkdir -p "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/share/opencode-podman-status"; \
+	install -m 755 $(BIN) "$(DESTDIR)$(PREFIX)/bin/opencode-podman-status"; \
+	install -m 644 $(PLUGIN) "$(DESTDIR)$(PREFIX)/share/opencode-podman-status/opencode-podman-status.js"
 
 clean:
 	@$(LINUX_ONLY); cargo clean

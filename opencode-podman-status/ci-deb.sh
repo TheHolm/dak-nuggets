@@ -68,6 +68,13 @@ install -D -m 755 \
     "$build_dir/release/opencode-podman-status" \
     "$stage_dir/usr/bin/opencode-podman-status"
 
+# The status plugin is architecture-independent data loaded by opencode, so it
+# goes under /usr/share/<package>/ per Debian policy. Users point opencode.json
+# at this exact path - see README.markdown - so it must not move.
+install -D -m 644 \
+    "$here/plugin/opencode-podman-status.js" \
+    "$stage_dir/usr/share/opencode-podman-status/opencode-podman-status.js"
+
 deb="$dist_dir/opencode-podman-status_${version}-${revision}_${arch}.deb"
 
 # build-deb.sh omits the Depends field entirely when given an empty value, which
@@ -83,5 +90,7 @@ deb="$dist_dir/opencode-podman-status_${version}-${revision}_${arch}.deb"
     --description "$PKG_DESCRIPTION" \
     --depends "$depends"
 
-# Fail if the binary did not make it into the .deb.
-dpkg-deb -c "$deb" | grep -qF 'usr/bin/opencode-podman-status'
+# Fail if the binary or the plugin did not make it into the .deb.
+contents="$(dpkg-deb -c "$deb")"
+grep -qF 'usr/bin/opencode-podman-status' <<<"$contents"
+grep -qF 'usr/share/opencode-podman-status/opencode-podman-status.js' <<<"$contents"

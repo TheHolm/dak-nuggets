@@ -15,8 +15,8 @@
 //!    listening sockets they hold, identify its port exactly.
 //!
 //! Only a port found this way is ever connected to. If opencode is running but
-//! holds no listening socket, it was started without `--port`, and that is
-//! reported as such.
+//! holds no listening socket, neither the status plugin nor `--port` is in use,
+//! and that is reported as such.
 //!
 //! All of this runs **on the host**, without entering any namespace:
 //! `/proc/<pid>/net/tcp` is the TCP table of *that process's* network namespace,
@@ -134,7 +134,8 @@ pub enum Discovery {
     Found(Vec<u16>),
     /// No opencode process in this network namespace.
     NotRunning,
-    /// opencode is running but holds no listening socket - started without `--port`.
+    /// opencode is running but holds no listening socket: neither the status
+    /// plugin nor `--port` is in use.
     NotListening,
     /// opencode is running, but its open files could not be inspected.
     Unreadable(String),
@@ -147,7 +148,9 @@ impl Discovery {
             Discovery::Found(_) => String::new(),
             Discovery::NotRunning => "opencode is not running in this container".to_string(),
             Discovery::NotListening => {
-                "opencode is running without --port, so it has no API socket".to_string()
+                "opencode is running but listens on nothing: enable the status plugin \
+                 (see README.markdown)"
+                    .to_string()
             }
             Discovery::Unreadable(e) => format!("cannot inspect opencode's sockets: {e}"),
         }
@@ -404,7 +407,7 @@ mod tests {
     #[test]
     fn discovery_reasons_are_specific() {
         assert!(Discovery::NotRunning.reason().contains("not running"));
-        assert!(Discovery::NotListening.reason().contains("--port"));
+        assert!(Discovery::NotListening.reason().contains("status plugin"));
         assert!(Discovery::Unreadable("boom".into()).reason().contains("boom"));
         assert_eq!(Discovery::Found(vec![4096]).reason(), "");
     }

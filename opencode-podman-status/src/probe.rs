@@ -7,6 +7,12 @@
 //! are only ever ones established by socket ownership (see [`crate::sockets`])
 //! or named explicitly by the user.
 //!
+//! Two kinds of server can answer, and both speak the same routes and shapes:
+//! opencode's own API (only when opencode was started with `--port`) and the
+//! read-only status plugin (`plugin/opencode-podman-status.js`). They are told
+//! apart by the `source` marker the plugin puts in `/global/health`; with the
+//! plugin, every age comes straight from its `since_ms` fields.
+//!
 //! The server is treated as untrusted: its answers are bounded in time and size
 //! by the [`Client`], and nothing taken from one response reaches the next
 //! request's path unless it passes [`is_safe_id`].
@@ -17,6 +23,56 @@ use serde::{Deserialize, Serialize};
 
 use crate::http::{Client, Connect};
 use crate::status::{Observation, State};
+
+/// The `source` value the status plugin reports in `/global/health`.
+pub const PLUGIN_MARKER: &str = "opencode-podman-status-plugin";
+
+/// Port the status plugin listens on unless `OPENCODE_STATUS_PORT` says otherwise.
+pub const DEFAULT_PLUGIN_PORT: u16 = 4097;
+
+/// Which kind of server the user wants the state from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// The status plugin if opencode holds its port, otherwise opencode's API.
+    Auto,
+    /// Only the status plugin.
+    Plugin,
+    /// Only opencode's own API (needs `opencode --port`).
+    Api,
+}
+
+impl Source {
+    /// Parses a `--source` value.
+    pub fn parse(value: &str) -> Option<Source> {
+        match value {
+            "auto" => Some(Source::Auto),
+            "plugin" => Some(Source::Plugin),
+            "api" => Some(Source::Api),
+            _ => None,
+        }
+    }
+}
+
+/// Orders candidate ports so the preferred kind of server is tried first.
+///
+/// Every candidate is already known to belong to opencode (the plugin runs
+/// inside opencode's own process, so its listener is opencode's too). For
+/// `auto` and `plugin` the plugin port goes first; for `api` it goes last. The
+/// `/global/health` marker, not the port number, then decides what each one is.
+pub fn order_candidates(ports: &[u16], plugin_port: u16, source: Source) -> Vec<u16> {
+    let (plugin, others): (Vec<u16>, Vec<u16>) = ports.iter().partition(|&&p| p == plugin_port);
+    match source {
+        Source::Auto | Source::Plugin => plugin.into_iter().chain(others).collect(),
+        Source::Api => others.into_iter().chain(plugin).collect(),
+    }
+}
+
+/// The part of `/global/health` that matters: the plugin's marker, if any.
+#[derive(Debug, Default, Deserialize)]
+struct Health {
+    #[serde(default)]
+    source: Option<String>,
+}
 
 /// Most busy sessions to interrogate for a turn start time.
 ///
@@ -30,6 +86,9 @@ pub struct Report {
     /// The port opencode was found on, when it was found at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// What answered: `plugin` or `api`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// The instance's state, or `None` if it could not be determined.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
@@ -44,19 +103,14 @@ pub struct Report {
 impl Report {
     /// A failed probe, carrying the reason for `--list` to display.
     pub fn failed(reason: impl Into<String>) -> Self {
-        Report { port: None, state: None, since_ms: None, reason: Some(reason.into()) }
+        Report { port: None, source: None, state: None, since_ms: None, reason: Some(reason.into()) }
     }
 
     /// Parses the state word back into a [`State`].
     ///
     /// Unknown words are treated as "not determined" rather than guessed at.
     pub fn parsed_state(&self) -> Option<State> {
-        match self.state.as_deref() {
-            Some("run") => Some(State::Run),
-            Some("wait") => Some(State::Wait),
-            Some("done") => Some(State::Done),
-            _ => None,
-        }
+        self.state.as_deref().and_then(State::from_word)
     }
 }
 
@@ -123,12 +177,14 @@ impl MessageEntry {
 /// `ports` must already be known to belong to opencode (or be the user's own
 /// explicit choice): other servers in the container are never contacted - an
 /// earlier version sent each of them a health check and they logged errors.
-pub fn run<C: Connect>(client: &mut Client<C>, ports: &[u16], now_ms: i64) -> Report {
-    // Normally exactly one. Several means opencode holds more than one listener,
-    // all of them its own, so asking each is safe.
+/// `ports` are tried in order (see [`order_candidates`]) and the first one that
+/// is the kind of server `source` allows, and answers, wins.
+pub fn run<C: Connect>(client: &mut Client<C>, ports: &[u16], source: Source, now_ms: i64) -> Report {
+    // Normally one or two (the plugin, and opencode's API if --port was given).
+    // All belong to opencode, so asking each is safe.
     let mut last_error = None;
     for &candidate in ports {
-        match probe_one(client, candidate, now_ms) {
+        match probe_one(client, candidate, source, now_ms) {
             Ok(report) => return report,
             Err(e) => last_error = Some(e),
         }
@@ -137,10 +193,24 @@ pub fn run<C: Connect>(client: &mut Client<C>, ports: &[u16], now_ms: i64) -> Re
 }
 
 /// Queries one candidate port.
-fn probe_one<C: Connect>(client: &mut Client<C>, port: u16, now_ms: i64) -> Result<Report, String> {
-    // A cheap liveness check before the real requests. The port is already known
-    // to be opencode's, so this only guards against it still starting up.
-    client.get(port, "/global/health").map_err(|e| format!("port {port}: {e}"))?;
+fn probe_one<C: Connect>(
+    client: &mut Client<C>,
+    port: u16,
+    source: Source,
+    now_ms: i64,
+) -> Result<Report, String> {
+    // A liveness check that also says which kind of server this is. The port is
+    // already known to be opencode's, so asking is safe.
+    let body = client.get(port, "/global/health").map_err(|e| format!("port {port}: {e}"))?;
+    let health: Health = serde_json::from_slice(&body).unwrap_or_default();
+    let is_plugin = health.source.as_deref() == Some(PLUGIN_MARKER);
+    match (source, is_plugin) {
+        (Source::Plugin, false) => {
+            return Err(format!("port {port}: not the status plugin (is it enabled in opencode.json?)"))
+        }
+        (Source::Api, true) => return Err(format!("port {port}: this is the status plugin, not opencode's API")),
+        _ => {}
+    }
 
     let statuses: HashMap<String, crate::status::SessionStatus> =
         fetch_json(client, port, "/session/status")?;
@@ -151,15 +221,23 @@ fn probe_one<C: Connect>(client: &mut Client<C>, port: u16, now_ms: i64) -> Resu
     let observation = Observation { statuses, questions, permissions };
     let state = observation.state();
 
-    let since_ms = match state {
-        // Free: the oldest pending request's ID encodes when it was created.
-        State::Wait => observation.wait_since_ms(now_ms),
-        State::Run => busy_since_ms(client, port, &observation, now_ms),
-        State::Done => idle_since_ms(client, port, now_ms),
+    let since_ms = if is_plugin {
+        // The plugin stamps every entry itself: no decoding, no extra requests.
+        observation.reported_since_ms(state).and_then(|ms| plausible_past(ms, now_ms))
+    } else {
+        match state {
+            // Free: the oldest pending request's ID encodes when it was created.
+            State::Wait => observation.wait_since_ms(now_ms),
+            State::Run => busy_since_ms(client, port, &observation, now_ms),
+            State::Done => idle_since_ms(client, port, now_ms),
+            // opencode's API has no error status; this only happens if it gains one.
+            State::Error => None,
+        }
     };
 
     Ok(Report {
         port: Some(port),
+        source: Some(if is_plugin { "plugin" } else { "api" }.to_string()),
         state: Some(state.word().to_string()),
         since_ms,
         reason: None,
@@ -336,7 +414,7 @@ mod tests {
             ("/permission", "[]".into()),
             ("/session", format!(r#"[{{"time":{{"created":1,"updated":{}}}}}]"#, now - 60_000)),
         ]);
-        let report = run(&mut client(), &[port], now);
+        let report = run(&mut client(), &[port], Source::Auto, now);
         assert_eq!(report.parsed_state(), Some(State::Done));
         assert_eq!(report.since_ms, Some(now - 60_000));
         assert_eq!(report.port, Some(port));
@@ -356,7 +434,7 @@ mod tests {
             ("/question", "[]".into()),
             ("/permission", "[]".into()),
         ]);
-        let report = run(&mut client(), &[port], 1790308945355);
+        let report = run(&mut client(), &[port], Source::Auto, 1790308945355);
         assert_eq!(report.parsed_state(), Some(State::Run));
         assert_eq!(report.since_ms, None);
         let seen = seen.lock().unwrap();
@@ -378,9 +456,114 @@ mod tests {
                 format!(r#"[{{"info":{{"time":{{"created":{}}}}},"parts":[]}}]"#, now - 5_000),
             ),
         ]);
-        let report = run(&mut client(), &[port], now);
+        let report = run(&mut client(), &[port], Source::Auto, now);
         assert_eq!(report.parsed_state(), Some(State::Run));
         assert_eq!(report.since_ms, Some(now - 5_000));
+    }
+
+    /// The plugin's routes, as served by plugin/opencode-podman-status.js.
+    fn plugin_routes(status: &str, questions: &str) -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "/global/health",
+                format!(r#"{{"healthy":true,"version":"0.2.0","source":"{PLUGIN_MARKER}"}}"#),
+            ),
+            ("/session/status", status.to_string()),
+            ("/question", questions.to_string()),
+            ("/permission", "[]".to_string()),
+        ]
+    }
+
+    /// Against the plugin, the age comes from its `since_ms` and costs no
+    /// requests beyond the four routes - even for a busy session.
+    #[test]
+    fn plugin_supplies_ages_without_extra_requests() {
+        let now = 1790308945355;
+        let (port, seen) = fake_server(plugin_routes(
+            &format!(r#"{{"ses_a":{{"type":"busy","since_ms":{}}}}}"#, now - 7_000),
+            "[]",
+        ));
+        let report = run(&mut client(), &[port], Source::Auto, now);
+        assert_eq!(report.parsed_state(), Some(State::Run));
+        assert_eq!(report.since_ms, Some(now - 7_000));
+        assert_eq!(report.source.as_deref(), Some("plugin"));
+        assert_eq!(seen.lock().unwrap().len(), 4);
+    }
+
+    /// The plugin's error state comes through, with its age.
+    #[test]
+    fn plugin_reports_error_state() {
+        let now = 1790308945355;
+        let (port, _) = fake_server(plugin_routes(
+            &format!(r#"{{"ses_a":{{"type":"error","since_ms":{}}}}}"#, now - 60_000),
+            "[]",
+        ));
+        let report = run(&mut client(), &[port], Source::Auto, now);
+        assert_eq!(report.parsed_state(), Some(State::Error));
+        assert_eq!(report.since_ms, Some(now - 60_000));
+    }
+
+    /// A plugin timestamp from the future is shown as unknown, not negative.
+    #[test]
+    fn implausible_plugin_time_is_unknown() {
+        let now = 1790308945355;
+        let (port, _) = fake_server(plugin_routes(
+            &format!(r#"{{"ses_a":{{"type":"busy","since_ms":{}}}}}"#, now + 3_600_000),
+            "[]",
+        ));
+        assert_eq!(run(&mut client(), &[port], Source::Auto, now).since_ms, None);
+    }
+
+    /// `--source plugin` refuses opencode's API, and `--source api` the plugin,
+    /// each after nothing more than the health check.
+    #[test]
+    fn source_restricts_what_is_accepted() {
+        let (api, api_seen) = fake_server(vec![("/global/health", r#"{"healthy":true}"#.into())]);
+        let report = run(&mut client(), &[api], Source::Plugin, 0);
+        assert!(report.reason.unwrap().contains("not the status plugin"));
+        assert_eq!(*api_seen.lock().unwrap(), vec!["/global/health"]);
+
+        let (plugin, plugin_seen) = fake_server(plugin_routes("{}", "[]"));
+        let report = run(&mut client(), &[plugin], Source::Api, 0);
+        assert!(report.reason.unwrap().contains("is the status plugin"));
+        assert_eq!(*plugin_seen.lock().unwrap(), vec!["/global/health"]);
+    }
+
+    /// In auto mode the first candidate that answers wins, whichever kind it is.
+    #[test]
+    fn auto_falls_back_to_the_api() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let dead = listener.local_addr().unwrap().port();
+        drop(listener);
+        let (api, _) = fake_server(vec![
+            ("/global/health", r#"{"healthy":true}"#.into()),
+            ("/session/status", "{}".into()),
+            ("/question", "[]".into()),
+            ("/permission", "[]".into()),
+            ("/session", "[]".into()),
+        ]);
+        let report = run(&mut client(), &[dead, api], Source::Auto, 0);
+        assert_eq!(report.source.as_deref(), Some("api"));
+        assert_eq!(report.parsed_state(), Some(State::Done));
+    }
+
+    /// The plugin port is tried first, except when the API is asked for.
+    #[test]
+    fn orders_candidates_by_source() {
+        assert_eq!(order_candidates(&[4096, 4097], 4097, Source::Auto), vec![4097, 4096]);
+        assert_eq!(order_candidates(&[4096, 4097], 4097, Source::Plugin), vec![4097, 4096]);
+        assert_eq!(order_candidates(&[4097, 4096], 4097, Source::Api), vec![4096, 4097]);
+        assert_eq!(order_candidates(&[4096], 4097, Source::Auto), vec![4096]);
+        assert_eq!(order_candidates(&[], 4097, Source::Auto), Vec::<u16>::new());
+    }
+
+    /// `--source` values parse; others do not.
+    #[test]
+    fn parses_source_values() {
+        assert_eq!(Source::parse("auto"), Some(Source::Auto));
+        assert_eq!(Source::parse("plugin"), Some(Source::Plugin));
+        assert_eq!(Source::parse("api"), Some(Source::Api));
+        assert_eq!(Source::parse("both"), None);
     }
 
     /// An unreachable candidate is reported with its port, not as a panic.
@@ -389,7 +572,7 @@ mod tests {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
-        let report = run(&mut client(), &[port], 0);
+        let report = run(&mut client(), &[port], Source::Auto, 0);
         assert_eq!(report.parsed_state(), None);
         assert!(report.reason.unwrap().contains(&format!("port {port}")));
     }
@@ -397,7 +580,7 @@ mod tests {
     /// With no candidates at all there is still a report, not a panic.
     #[test]
     fn no_candidates_is_a_failed_report() {
-        let report = run(&mut client(), &[], 0);
+        let report = run(&mut client(), &[], Source::Auto, 0);
         assert!(report.reason.is_some());
     }
 
@@ -487,9 +670,11 @@ mod tests {
             ("run", State::Run),
             ("wait", State::Wait),
             ("done", State::Done),
+            ("error", State::Error),
         ] {
             let report = Report {
                 port: Some(4096),
+                source: Some("api".to_string()),
                 state: Some(word.to_string()),
                 since_ms: Some(1790308726787),
                 reason: None,
@@ -508,6 +693,7 @@ mod tests {
     fn unknown_state_word_does_not_parse() {
         let report = Report {
             port: Some(4096),
+            source: None,
             state: Some("hibernating".to_string()),
             since_ms: None,
             reason: None,

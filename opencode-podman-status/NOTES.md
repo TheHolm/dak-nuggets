@@ -466,6 +466,60 @@ break that.
 
 ---
 
+## 6a. The status plugin (0.2.0)
+
+`plugin/opencode-podman-status.js` lets opencode be monitored **without `--port`**,
+i.e. without exposing the full remote-control API (§6). It serves GET-only
+`/global/health` (with `source:"opencode-podman-status-plugin"`),
+`/session/status`, `/question`, `/permission` - opencode's own shapes plus
+`since_ms`, nothing else - on `127.0.0.1:${OPENCODE_STATUS_PORT:-4097}`. Everything
+else is 404, other methods 405. With `OPENCODE_SERVER_PASSWORD` set it requires the
+same Basic credentials (SHA-256 + `timingSafeEqual`), checked before routing.
+
+Measured against 1.18.32 (TUI and `serve`, with a mock OpenAI-compatible
+provider driving real permission/question/error turns):
+
+- An absolute path in `opencode.json`'s `plugin` array loads the file. Plugin
+  context keys: `client, project, worktree, directory, experimental_workspace,
+  serverUrl, $`.
+- `Bun.serve` inside the plugin works in the TUI **without `--port`**, and the
+  listener is held by the main `opencode` process (the plugin runs on the TUI's
+  worker thread, same fd table), so §3a's ownership discovery finds it unchanged.
+- **Every export of a plugin module is treated as a plugin and must be a function**
+  (`TypeError("Plugin export is not a function")`). Hence one export, with test
+  internals hung off it as `.internals`; a test pins this.
+- Events: `permission.asked`/`question.asked` carry `id`+`sessionID`; replies carry
+  `requestID` (`question.rejected` too). `session.status` busy repeats many times
+  per turn, so `since_ms` is stamped only on a real change (busy<->retry keeps it).
+- **`session.error` arrives before the turn's `idle`**, so error persists through
+  that idle and clears on the next busy.
+- **User abort emits `session.error` `MessageAbortedError`** - ignored, the operator
+  was present.
+- **Aborting with a permission open emits no reply event, and opencode's own
+  `GET /permission` keeps listing it indefinitely** - so API mode can show a stale
+  `wait`. The plugin drops a session's pending requests when it goes idle.
+- A freshly started instance with no events yet reports `done` with no
+  `since_ms` (shown `--:--`); there is nothing to date it by. A startup snapshot
+  via `client` was considered and dropped: no session of a new instance can be
+  active before the plugin loads.
+- State lives on a `globalThis` symbol so several plugin initialisations in one
+  process (one per project instance) share one tracker and one listener instead of
+  fighting over the port. A port already in use is logged via `client.app.log` and
+  opencode carries on.
+- Tracked entries are capped (256 sessions/requests; only the newest idle kept).
+
+Helper side: `--source auto|plugin|api` (auto prefers `--plugin-port`, default
+4097, among *owned* listeners; the health marker, not the port number, decides
+what a port is), and `State::Error` - counted in `wait:` in the aggregate,
+`Error` on `--instance`, `error` in `--list`, which also gains `via=plugin|api`.
+Tests: `bun test` in `plugin/` (Bun needed only for that; `make test` skips with a
+message without it). Installed to `/usr/share/opencode-podman-status/` by the
+`.deb`, `$PREFIX/share/opencode-podman-status/` by `make install`.
+
+Dev-environment gotcha: **never `pkill` by the name `opencode`** here - the agent
+doing the work is itself an `opencode` process. Kill test instances by verified
+PID only (e.g. one whose netns differs from ours).
+
 ## 7. Rejected approaches, and why
 
 | Approach | Why not |
