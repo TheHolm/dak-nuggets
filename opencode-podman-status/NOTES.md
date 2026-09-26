@@ -526,7 +526,7 @@ PID only (e.g. one whose netns differs from ours).
 |---|---|
 | **Publish ports** (`-p` + `--hostname 0.0.0.0`) | Needs a per-container host port and exposes the unauthenticated API to every container on the network and to the host. Also hits the rootlesskit/pasta trap: forwarded traffic arrives at the container's interface address, not loopback, so a `127.0.0.1` bind silently never receives it. |
 | **`podman exec` + curl** | Needs an HTTP client in every image; 100–300 ms per exec, so nine containers get slow. |
-| **Plugin writing status files to a bind mount** | Push-based, but DAK polls on a timer, so observable freshness is identical — the advantage evaporates. Costs a second artifact in a third language plus a bind mount per container. |
+| **Plugin writing status files to a bind mount** | Push-based, but DAK polls on a timer, so observable freshness is identical — the advantage evaporates. Costs a bind mount per container, and gives the container a writable path into the host. *Reconsidered in 0.2.0:* a plugin that instead **serves** a read-only status API on the container's loopback (§6a) needs no mount, reuses the whole namespace transport unchanged, and removes the need for `--port` - which turned out to be the real security problem (§6). |
 | **Terminal window title** | opencode does set it, but only to `OpenCode` or `OC | <session title>` — **no status**. Adding status needs a plugin anyway, and reading titles is impossible on Wayland (no protocol to enumerate other clients' windows), collapses to one title if containers share a terminal via tabs, and is rewritten by tmux. |
 | **mDNS (`--mdns`)** | Forces `0.0.0.0`, and *skips publishing entirely* when the hostname is loopback. Multicast does not cross slirp4netns/pasta. |
 | **Podman labels for slot numbers** | **Labels are immutable after container creation** — there is no `podman container update --label` (open feature request, podman #27815). The program could not assign them itself. Reading them is free (`podman ps --format json` returns `Labels`), so this remains a cheap future option if stable numbering is ever wanted. |
@@ -608,8 +608,9 @@ PID only (e.g. one whose netns differs from ours).
 
 ## 10. Still to verify
 
-1. **`busy_since_ms` against a genuinely busy session** — needs a real agent turn
-   in flight. `POST /shell` does not make a session `busy`.
+1. ~~`busy_since_ms` against a genuinely busy session~~ — verified in 0.2.0 with a
+   mock provider holding a real turn open: API mode reported `run` with a
+   `since_ms` 2 ms from the plugin's own stamp.
 2. **`podman ps --format json` field availability** on the target podman version:
    whether `Created` is always numeric seconds and whether `.Pid` is present
    (the code uses a batched `podman inspect` for PIDs and accepts several spellings
@@ -618,4 +619,12 @@ PID only (e.g. one whose netns differs from ours).
    two podman invocations total per run regardless of count, but this is untested
    above one.
 4. **A container up but not yet listening** — expected to render `----`/`--:--`,
-   exercised only by unit tests so far.
+   exercised only by unit tests so far. (Deliberately the same rendering as "no
+   opencode in the container" and "no plugin and no `--port`"; `--list` tells
+   them apart. Kept as-is on request.)
+5. **The plugin under `opencode web` / desktop** — verified only in the TUI and
+   `opencode serve`.
+6. **The plugin across opencode upgrades** — it depends on bus event names and
+   payload fields (§6a), which are not a documented stable interface. If a
+   future opencode renames them the plugin degrades to "everything done"; re-run
+   the event capture described in §6a after upgrading opencode.

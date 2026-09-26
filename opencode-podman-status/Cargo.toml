@@ -1,6 +1,6 @@
 [package]
 name = "opencode-podman-status"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Reports the state of opencode instances running in rootless podman containers"

@@ -48,11 +48,11 @@ for full details, build instructions and dependencies.
 Reports what each [opencode](https://opencode.ai) instance running in a rootless
 [podman](https://podman.io) container is doing, as three six-character lines:
 `run: 3`, `wait:1`, `done:5` — how many instances are working, how many are
-waiting for an answer from you, and how many are idle. `--instance` reports one
-container instead.
+waiting for you (a question, a permission prompt or a failed turn), and how many
+are idle. `--instance` reports one container instead.
 
-**Linux only.** It queries each instance by entering that container's user and
-network namespaces, and rootless podman does not exist on FreeBSD. It is
+**Linux only.** It queries each instance through sockets created inside that
+container's network namespace, and rootless podman does not exist on FreeBSD. It is
 therefore absent from FreeBSD packages, and its `make` targets short-circuit
 there so a collection-wide build still succeeds.
 
@@ -66,12 +66,15 @@ Typical DAK use — show the summary on a button:
 }
 ```
 
-Each container must run opencode with an explicit port, e.g.
-`opencode --port 4096`; setting `server.port` in `opencode.json` does not work.
+Enable the bundled read-only status plugin in each container's `opencode.json`
+(installed at `/usr/share/opencode-podman-status/opencode-podman-status.js`)
+and run opencode **without `--port`**. `opencode --port` still works, but it
+exposes opencode's full remote-control API, which lets anything that can reach
+it, including the agent itself, skip every human approval check.
 
 See
 [opencode-podman-status/README.markdown](opencode-podman-status/README.markdown)
-for full details, including the security implications of that port.
+for full details, including the security section.
 
 ## Building
 

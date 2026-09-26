@@ -2,10 +2,16 @@
 
 Reports what each [opencode](https://opencode.ai) instance running in a rootless
 [podman](https://podman.io) container on this machine is doing: how many are
-working, how many are waiting for an answer from you, and how many are idle.
+working, how many are waiting for you, and how many are idle.
 
-**Linux only.** It works by entering a rootless podman container's user and
-network namespaces, and rootless podman does not exist on FreeBSD — see
+The recommended setup is to enable the bundled **read-only status plugin** in
+each container's opencode and to run opencode **without `--port`**. `opencode
+--port` exposes opencode's full remote-control API. Anything that can reach that
+port can use it to skip every human check, and that includes the agent itself,
+from inside its own container. See [Security](#security).
+
+**Linux only.** It works by creating sockets inside rootless podman containers'
+network namespaces, and rootless podman does not exist on FreeBSD. See
 [Platform support](#platform-support).
 
 ## Output
@@ -18,17 +24,25 @@ wait:1
 done:5
 ```
 
-- **`run`** — instances with at least one session working (`busy` or `retry`)
-- **`wait`** — instances with a question or permission prompt waiting on you
-- **`done`** — instances reachable and fully idle
+- **`run`**: instances with at least one session working (`busy` or `retry`)
+- **`wait`**: instances waiting for you. That means a question or permission
+  prompt, or (status plugin only) a turn that failed with an error
+- **`done`**: instances reachable and fully idle
 
-Each container counts in exactly one bucket, with precedence **wait > run >
-done**: something needing a human answer is always the more useful thing to
-surface. Counts are clamped at 9.
+Each container counts in exactly one bucket. The precedence is **wait > error >
+run > done**, because something that needs you is always the more useful thing
+to surface. Errors are counted on the `wait:` line, since the button has only
+three lines and a failed turn needs the operator just as a question does.
+Counts are clamped at 9.
 
-Containers that are running but whose opencode API cannot be reached count in
-*none* of the three, so the numbers can legitimately sum to less than the number
-of containers. `--list` shows why.
+Some containers are counted in *none* of the three:
+
+- no opencode process is running in them;
+- opencode is running but has neither the plugin nor `--port`;
+- opencode is still starting.
+
+So the numbers can legitimately add up to less than the number of containers.
+`--list` shows why each one was left out.
 
 ### One container at a time
 
@@ -37,14 +51,18 @@ of containers. `--list` shows why.
 ```
 $ opencode-podman-status --instance 2
 api        # container name, "opencode-" stripped, truncated to 6 characters
-wait       # run | wait | done | ----
+wait       # run | wait | done | Error | ----
 00:12      # hh:mm in that state
 ```
 
-A container that exists but cannot be reached shows `----` and `--:--`, keeping
-the misconfiguration visible. By far the most common cause is opencode having
-been started without `--port`; `--list` says so explicitly. A slot that **does not exist prints nothing at
-all**, so unused DAK buttons stay blank.
+- `Error` means the instance's last turn failed, for example with a provider or
+  API error. Only the status plugin can report it; a user abort (Esc) is not an
+  error.
+- `----` / `--:--` means the container exists but could not be probed, for any
+  of the reasons above. The problem stays visible on the button, and `--list`
+  says which reason it is.
+- A slot that **does not exist prints nothing at all**, so unused DAK buttons
+  stay blank.
 
 Slots are numbered from 1 by container creation time, oldest first. That is
 stable across runs, which is what a fixed button needs. Terminating a container
@@ -52,42 +70,95 @@ does renumber the ones created after it.
 
 ## Requirements
 
-Each container must run opencode with an **explicit `--port`**:
+Each container needs **one** of these:
 
+1. **The status plugin** (recommended). See [Enabling the status
+   plugin](#enabling-the-status-plugin). opencode runs normally, with no
+   `--port`.
+2. **`opencode --port 4096`**, using opencode's own API. This works, but read
+   [Security](#security) first. The same port in every container is fine,
+   because each container has its own network namespace. Setting `server.port`
+   in `opencode.json` does **not** work: opencode's schema scopes that block to
+   `opencode serve` and `web`, and the TUI ignores it.
+
+Neither option needs published ports (`-p`), `--hostname 0.0.0.0`, podman labels
+or bind mounts.
+
+The helper must run **as the user who started the containers**. opencode must
+run as a UID inside the container that maps back to that user, which is root
+inside the container, the default. See [How it works](#how-it-works).
+
+## Enabling the status plugin
+
+The plugin is a single JavaScript file, installed by the package at:
+
+| Installed by | Location |
+|---|---|
+| `.deb` (Debian, Ubuntu, and the `dak-nuggets` bundle) | `/usr/share/opencode-podman-status/opencode-podman-status.js` |
+| `make install` | `$PREFIX/share/opencode-podman-status/opencode-podman-status.js` (default `PREFIX=/usr/local`) |
+| FreeBSD `.pkg` | not packaged, since the program is Linux-only |
+
+To enable it, add its path to the `plugin` array of an `opencode.json` that
+opencode reads, for example the global `~/.config/opencode/opencode.json` inside
+the container:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["/usr/share/opencode-podman-status/opencode-podman-status.js"]
+}
 ```
-opencode --port 4096
-```
 
-The same port in every container is correct and intended: each container has its
-own network namespace, so there is no conflict, and nothing needs publishing to
-the host.
+opencode resolves that path **inside the container**, so the file must exist at
+that path there. Any `plugin` entries you already have stay as they are; add
+this one to the list. opencode loads plugins at startup without asking, so
+restart opencode after the change.
 
-> **Setting `server.port` in `opencode.json` does not work.** opencode's own
-> schema documents that block as *"Server configuration for opencode serve and
-> web commands"* — the TUI resolves its network options without consulting the
-> config, so a plain `opencode` opens no listening socket at all and talks to its
-> own server in-process. This is by design, not a bug. If you cannot change the
-> launch command, wrap it in the image: `exec opencode --port 4096 "$@"`.
+What the plugin does:
 
-Nothing else is required. No published ports (`-p`), no `--hostname 0.0.0.0`, no
-podman labels, no bind mounts, no plugins, and no `OPENCODE_SERVER_PASSWORD`.
-
-The helper must run **as the user who started the containers**, and opencode must
-run as a UID inside the container that maps back to that user — which is the
-default. See [How it works](#how-it-works).
+- It listens on **`127.0.0.1` only**, on port **4097**. Set
+  `OPENCODE_STATUS_PORT` in opencode's environment to change the port, and give
+  the helper the matching `--plugin-port`.
+- It answers only `GET` on four routes: `/global/health`, `/session/status`,
+  `/question` and `/permission`. It uses opencode's own response shapes,
+  reduced to session state and `since_ms`. Every other path gets 404 and every
+  other method 405.
+- Nothing can be changed through it, and it returns no titles, messages, file
+  paths or error text.
+- If opencode is started with `OPENCODE_SERVER_PASSWORD`, the plugin requires
+  the same HTTP Basic credentials (`OPENCODE_SERVER_USERNAME`, default
+  `opencode`). Give the helper the same password, as described in
+  [Usage](#usage).
+- Its data comes from opencode's own events as they happen. A freshly started
+  instance therefore shows `done` with an unknown age (`--:--`) until something
+  happens in it.
 
 ## Usage
 
 ```
 opencode-podman-status [options]
 
-  --instance <slot|name>  Detail for one container: name, state, time in state.
-                          Prints nothing at all if that slot does not exist.
+  --instance <slot|name>  Detail for one container: name, state (run, wait,
+                          done, or Error), time in state. Prints nothing at
+                          all if that slot does not exist.
   --list                  Diagnostic table of every container (not for DAK).
   --pid <n>               Diagnostic: probe this process's namespaces directly,
                           bypassing podman, and print the raw JSON report.
+  --source <auto|plugin|api>
+                          Take the state from the status plugin, from
+                          opencode's own API, or (auto, the default) from the
+                          plugin when present and the API otherwise.
+  --plugin-port <n>       Port the status plugin listens on (default 4097;
+                          OPENCODE_STATUS_PORT in the container changes it).
   --port <n>              Use this port instead of discovering it.
-  --timeout <ms>          Per-request timeout (default 2500).
+  --timeout <ms>          Time budget per container, all requests included
+                          (default 2500).
+  --password-file <path>  Password for opencode servers started with
+                          OPENCODE_SERVER_PASSWORD; one for all containers.
+                          The file should be mode 600.
+  --password <pw>         The same, given directly. Visible to every local
+                          user via ps(1) - prefer --password-file.
+  --username <name>       Username for the above (default opencode).
   -h, --help              Usage.
   -V, --version           Version.
 ```
@@ -95,20 +166,39 @@ opencode-podman-status [options]
 Containers are matched by name: exactly `opencode`, or `opencode-` followed by
 anything. Lookalikes such as `openconnect` or `my-opencode` are never probed.
 
-Exit status is 0 whenever the situation could be reported, including "no
-containers at all" (which prints `run: 0` / `wait:0` / `done:0`) and "slot does
-not exist" (which prints nothing). Exit 1 with a message on stderr is reserved
-for a bad command line or podman being unavailable.
+Exit status is 0 whenever the situation could be reported. That includes "no
+containers at all", which prints `run: 0` / `wait:0` / `done:0`, and "slot does
+not exist", which prints nothing. Exit status 1, with a message on stderr, is
+reserved for a bad command line, an unreadable password file, or podman being
+unavailable.
+
+### Passwords
+
+A single password is used for every container.
+
+- **`--password-file <path>`** is the one to use. One trailing newline is
+  stripped. If the file is readable by group or others, the helper warns on
+  stderr (and still runs); `chmod 600` it.
+- **`--password <pw>`** also works, but **every local user can read it** through
+  `ps` and `/proc/<pid>/cmdline`, on every DAK refresh, unless `/proc` is
+  mounted with `hidepid`. It is also stored in plain text in DAK's
+  `config.json`.
+
+The password is sent only as an HTTP `Authorization` header, from the helper's
+own process. It never enters a container. A wrong or missing password shows in
+`--list` as `HTTP 401: authentication required or wrong password`.
 
 ### Diagnosing
 
-`--list` prints one line per container with its slot, name, state, age, PID,
-discovered port and any failure reason:
+`--list` prints one line per container: slot, name, state, age, PID, port,
+which server answered (`via=plugin` or `via=api`), and any failure reason:
 
 ```
 $ opencode-podman-status --list
- 1  opencode-web             run      00:03  pid=41233    port=4096
- 2  opencode-api             unknown  --:--  pid=41890    port=-      opencode is running without --port, so it has no API socket
+ 1  opencode-web             run      00:03  pid=41233    port=4097   via=plugin
+ 2  opencode-api             error    00:41  pid=41560    port=4097   via=plugin
+ 3  opencode-db              unknown  --:--  pid=41890    port=-      via=-       opencode is running but listens on nothing: enable the status plugin (see README.markdown)
+ 4  opencode-tmp             unknown  --:--  pid=42011    port=-      via=-       opencode is not running in this container
 ```
 
 ## DAK integration
@@ -133,24 +223,49 @@ Or give each container its own button:
 }
 ```
 
+If opencode is password-protected:
+
+```json
+{
+  "type": "text_exec",
+  "params": "opencode-podman-status --password-file /home/me/.config/opencode-podman-status/password",
+  "refresh": 5
+}
+```
+
 DAK renders only the first six characters of the first three lines, which is
 exactly what this program emits. Keep `refresh` above `--timeout` (default
 2500 ms) so a slow container cannot cause overlapping invocations.
 
 ## How it works
 
-opencode's TUI runs an HTTP server, and `--port` makes it listen on the
-container's `127.0.0.1`. Loopback is per network namespace, so that socket is
-reachable only from inside the container — and in rootless podman the host cannot
-route to container addresses at all.
+Whichever server answers (the plugin, or opencode's API when `--port` is used),
+it listens on the container's `127.0.0.1`. Loopback belongs to a network
+namespace, so the host cannot reach that address, and rootless podman gives the
+host no route to container addresses at all.
 
-So the helper goes to the socket instead of the other way round. For each
-container it forks, moves the child into the container's user and network
-namespaces, and re-executes itself there; `127.0.0.1` is then the container's
-loopback and opencode answers normally. The child reports back as JSON and the
-parent aggregates.
+**A socket belongs for life to the network namespace it was created in**, and
+the helper relies on that. For each container:
 
-This needs no privileges beyond being the right user. From `setns(2)`:
+1. **Find the port by socket ownership, from the host.** `/proc/<pid>/net/tcp`
+   is the TCP table of *that process's* network namespace. The helper:
+   - finds the processes named `opencode` in the container's network namespace;
+   - collects the socket inodes they hold from `/proc/<pid>/fd`;
+   - keeps only the listeners with a matching inode.
+
+   It never tries ports, so **other servers in the same container are never
+   contacted**, not even to ask whether they are opencode.
+2. **Create sockets inside the container.** A short-lived forked child joins
+   the container's user namespace, then its network namespace, creates a few
+   unconnected TCP sockets, and hands them to the parent over a Unix socket
+   (`SCM_RIGHTS`). Then it exits. It runs none of the program's own logic: no
+   HTTP, no JSON, and no `exec` into anything.
+3. **Talk HTTP from outside.** The parent, which never changes namespace,
+   connects those sockets to `127.0.0.1:<port>`. The connections land on the
+   container's loopback. All requests and parsing happen in the parent.
+
+Joining the namespaces needs no privileges beyond being the right user. From
+`setns(2)`:
 
 > A process reassociating itself with a user namespace must have the
 > `CAP_SYS_ADMIN` capability in the target user namespace. […] Upon successfully
@@ -159,65 +274,92 @@ This needs no privileges beyond being the right user. From `setns(2)`:
 
 Rootless podman creates the container's user namespace as the invoking user, and
 a process whose effective UID owns a user namespace holds all capabilities in it.
-This is the same mechanism `podman unshare` and `nsenter -U -n -t` use — no root,
+This is the same mechanism `podman unshare` and `nsenter -U -n -t` use: no root,
 no setuid, no file capabilities.
 
-A container's namespaces are identified by reading `/proc/<pid>/ns/{user,net}`,
-never by reasoning about podman's network topology.
+Four GETs per container determine the state: `/global/health`,
+`/session/status`, `/question` and `/permission`. With the plugin, every age
+comes directly from its `since_ms` fields. With opencode's API it is decoded
+from opencode's timestamp-bearing IDs, which may need one or two extra requests.
 
-The port is found by **socket ownership**, never by trying ports. Inside the
-container, the helper looks for processes named `opencode`, collects the socket
-inodes they hold from `/proc/<pid>/fd`, and keeps only the listening sockets in
-the container's `/proc/net/tcp` with a matching inode. So nothing depends on a
-port convention, and **other servers in the same container are never
-contacted** — not even to ask whether they are opencode.
+The container side is treated as untrusted:
 
-Three GETs per container — `/session/status`, `/question` and `/permission` —
-determine the state. Only `--instance` pays for the extra request needed to work
-out how long the instance has been in that state.
+- each container gets one hard deadline (`--timeout`) covering everything;
+- each response is capped at 1 MiB, and each container at a 4 MiB total and 12
+  requests;
+- IDs taken from one response must look like plain opencode IDs before they are
+  used in the next request;
+- control characters are never printed to your terminal.
 
-`NOTES.md` covers the reverse-engineering behind all of this, including opencode's
-timestamp-bearing ID format and what was measured rather than assumed.
+`NOTES.md` covers the reverse-engineering behind all of this, and what was
+measured rather than assumed.
 
 ## Security
 
-The port this program talks to is an **unauthenticated remote-control API**: it
-can run shell commands, drive the agent, open a PTY, read files, answer the very
-permission prompts that are meant to gate dangerous tool calls, and stream the
-whole conversation. opencode only requires a password if
-`OPENCODE_SERVER_PASSWORD` is set, and the TUI does not warn when it is not.
+**`opencode --port` gives any client that can reach that port an easy way to
+bypass every human check.** The port serves opencode's full remote-control API.
+Through it, a client can:
 
-What keeps that acceptable here is that `--port` alone binds **`127.0.0.1` only**
-(opencode's default `hostname`), and loopback is per network namespace. So the
-API is reachable from inside that container, and from a process able to enter its
-namespaces — which means the same user, who could already `podman exec` into it.
-It is **not** reachable from other containers, from the host's network, or from
-the LAN.
+- **answer the agent's own permission and question prompts**
+  (`POST /permission/<id>/reply`, `POST /question/<id>/reply`). The approval
+  step that is supposed to gate dangerous tool calls is then skipped;
+- **run shell commands** (`POST /session/<id>/shell`) and **open terminals**
+  (the PTY routes), which never ask anyone at all;
+- send the agent new instructions, change its configuration, read files, and
+  stream the whole conversation.
 
-Two things would change that, and this program needs neither: `--hostname
-0.0.0.0` (also implied by `--mdns`) and publishing the port with `podman run -p`.
+The client that can most easily reach that port is **the agent itself**. Its
+bash tool runs inside the same container, where `127.0.0.1:4096` is right
+there. A single `curl` lets the agent approve its own permission request, or
+skip the request entirely and run the command through the API. Container
+isolation doesn't help here, because the agent is already inside the container.
 
-A password was considered and deliberately rejected: opencode reads it only from
-`OPENCODE_SERVER_PASSWORD`, there is no command-line alternative for the server
-side, and every process opencode spawns — the bash tool, LSP servers, MCP servers,
-formatters — inherits its environment. It would therefore be readable by exactly
-the in-container code it would be defending against, while protecting nothing that
-namespace isolation does not already protect.
+**A password does not fix this.** `OPENCODE_SERVER_PASSWORD` makes the API
+require HTTP Basic auth. But opencode takes the password only from its own
+environment, and every process it starts inherits that environment: the bash
+tool, terminals, LSP servers, MCP servers and formatters. The agent can
+therefore read it with `env`. A password does keep out other local processes
+that cannot see the container's environment, and nothing more.
+
+What `--port` does *not* do: it binds `127.0.0.1` only, and loopback is per
+network namespace. The API is therefore not reachable from other containers, the
+host network or the LAN, unless you also add `--hostname 0.0.0.0` (also implied
+by `--mdns`) or publish the port with `podman run -p`. Never do either.
+
+**Recommendation:** use the status plugin and run opencode **without `--port`**.
+The plugin gives the agent nothing it could use: it is read-only, it only
+reports session states and times, and it offers no route that changes anything.
+The worst the agent can do to it is stop it loading, which makes that container
+unmonitored. It gains no extra control that way. Use `--port` only if you accept
+that the agent in that container can approve its own actions.
+
+On the host side:
+
+- The helper never runs its own logic inside a container. Only a socket-creating
+  child enters the namespaces, briefly (see [How it works](#how-it-works)).
+- `--password` is visible to every local user. Use `--password-file` with mode
+  600.
 
 ## Building
 
 ```
 make build     # cargo build --release
-make test      # cargo test
+make test      # cargo test, plus the plugin's tests if Bun is installed
 make coverage  # needs cargo-llvm-cov
-make install   # PREFIX/DESTDIR honoured
+make install   # binary and plugin; PREFIX/DESTDIR honoured
 make clean
 ```
 
-Or with Cargo directly. Dependencies are `serde`, `serde_json` and `libc`; HTTP is
-hand-rolled, since every request is a plain loopback GET.
+Or with Cargo directly. Dependencies are `serde`, `serde_json` and `libc`. HTTP
+is hand-rolled, since every request is a plain loopback GET.
 
-The namespace-entry mechanism has its own opt-in integration test, kept out of
+**Running the plugin's tests needs [Bun](https://bun.sh)** (`bun test` in
+`plugin/`). Nothing else does: the plugin runs inside opencode, which has Bun
+built in, and building or packaging needs no Bun at all. Without Bun, `make test`
+skips the plugin tests with a message. Set `BUN=/path/to/bun` if it is not on
+`PATH`.
+
+The namespace mechanism has its own opt-in integration test. It is kept out of
 `make test` because it needs to create a nested user namespace, which many CI
 containers forbid:
 
@@ -237,9 +379,9 @@ Linux only, and deliberately so:
   approach an alternative design would have used is broken there too.
 
 The program therefore ships no `ci-freebsd.sh` and is absent from FreeBSD
-packaging, and its `Makefile` targets short-circuit with a message on non-Linux
-systems so a collection-wide `make` still succeeds.
+packaging. Its `Makefile` targets short-circuit with a message on non-Linux
+systems, so a collection-wide `make` still succeeds.
 
 ## License
 
-GNU Affero General Public License v3 or later — see [LICENSE](../LICENSE).
+GNU Affero General Public License v3 or later. See [LICENSE](../LICENSE).
