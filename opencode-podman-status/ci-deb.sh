@@ -45,6 +45,7 @@ root="$(cd "$here/.." && pwd)"
 # the program - see package-metadata.sh. `set -u` above turns a missing variable
 # into a build failure rather than an empty control field.
 . "$here/package-metadata.sh"
+. "$root/scripts/lib-timing.sh"
 
 # Rust statically links its own dependencies, so there is no runtime package to
 # depend on beyond the C library, which dpkg's shlibs machinery would add anyway.
@@ -63,6 +64,7 @@ mkdir -p "$build_dir" "$dist_dir"
 # directory rather than the source tree, which is what makes concurrent target
 # builds in one workspace safe.
 CARGO_TARGET_DIR="$build_dir" cargo build --release --manifest-path "$here/Cargo.toml"
+step_done "opencode-podman-status: built"
 
 install -D -m 755 \
     "$build_dir/release/opencode-podman-status" \
@@ -89,6 +91,7 @@ deb="$dist_dir/opencode-podman-status_${version}-${revision}_${arch}.deb"
     --synopsis "$PKG_SYNOPSIS" \
     --description "$PKG_DESCRIPTION" \
     --depends "$depends"
+step_done "opencode-podman-status: packaged (.deb)"
 
 # Fail if the binary or the plugin did not make it into the .deb.
 contents="$(dpkg-deb -c "$deb")"

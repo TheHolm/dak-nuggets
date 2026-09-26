@@ -41,6 +41,8 @@ mkdir -p "$dist"
 # Same metadata gate as the .deb path - see NOTES.md.
 "$root/scripts/check-package-metadata.sh" "$root"
 
+. "$root/scripts/lib-timing.sh"
+
 stages=()
 shopt -s nullglob
 for script in "$root"/*/ci-freebsd.sh; do
@@ -51,6 +53,7 @@ for script in "$root"/*/ci-freebsd.sh; do
     echo "== $name: cross-compiling for freebsd =="
     rm -rf "$stage"
     "$script" "$program_dir/build-freebsd" "$stage" "$dist" "$cross_file" "$deps_file"
+    step_done "$name: total for freebsd"
     stages+=("$stage")
 done
 
@@ -73,5 +76,6 @@ python3 "$root/scripts/build-freebsd-pkg.py" \
     --desc "Bundles every dak-nuggets helper program (see README.markdown) into a single package." \
     --www "https://github.com/TheHolm/dak-nuggets" \
     --output "$dist/dak-nuggets-${version}-freebsd-amd64.pkg"
+step_done "bundle (freebsd): total"
 
 echo "== done: individual + bundle .pkg packages for freebsd =="

@@ -224,6 +224,8 @@ Generic, language-agnostic tooling:
   pieces (libc/CRT/headers) extracted from `base.txz` - see below.
 - `extract-release-notes.sh`, `check-target-freshness.sh` - reused verbatim
   from TheHolm/dak; see that repo's own `NOTES.md`/`AGENTS.md` for background.
+- `lib-timing.sh` - sourced (never executed) by the scripts below to report
+  how long each of their steps took - see "Per-step timing" below.
 
 Target orchestrators (called once per target step; they discover programs by
 globbing `*/ci-deb.sh` / `*/ci-freebsd.sh`, so adding a program needs no
@@ -245,6 +247,43 @@ Per-program build recipes live in the program's own directory, not in
   <deps-file>` - cross-compiles and stage-installs, then calls
   `build-freebsd-pkg.py`. A program with no `ci-freebsd.sh` is simply skipped
   from FreeBSD packaging (e.g. if it can't be cross-compiled).
+
+## Per-step timing
+
+Every orchestrator and per-program build script prints how long each of its
+own steps took (`== label: MmSs ==`), by sourcing `scripts/lib-timing.sh` and
+calling its `step_done "label"` after each step. This is deliberately at a
+finer grain than Woodpecker's own per-CI-step timing (already available
+without any changes here - see the pipeline's start/finished timestamps in
+its web UI or via `GET /api/repos/{repo}/pipelines/{number}`, whose
+`workflows[].children[]` gives each step's `started`/`finished`): a single
+`build-freebsd-pkg` CI step runs for many minutes across several genuinely
+different phases (a base-system extraction, a live dependency-closure fetch,
+several programs' cross-compiles, packaging, ...), and knowing that the step
+took 12 minutes says nothing about which of those phases to look at first.
+
+`lib-timing.sh` uses bash's built-in `$SECONDS` (already ~0 at the start of
+any freshly exec'd script, no `date`/subprocess overhead, 1-second
+resolution - fine for steps taking seconds to minutes, not meant for
+anything finer). `.woodpecker/release.yaml`'s own inline commands (the
+`apt-get install`s, the `base.txz` download/extraction, the
+`fetch-freebsd-deps.py` invocation, `gh`'s own setup and the release
+create/upload) get the *same* `step_done` behaviour but from an inline,
+POSIX (`date +%s`-based) copy defined once near the top of each step's
+`commands`, right after that step's `chmod` - not by sourcing
+`lib-timing.sh`, because Woodpecker runs a step's `commands` as one
+continuous script under the image's default `/bin/sh` (confirmed: Woodpecker
+converts a step's `commands` list into one script executed once, so shell
+state - variables, functions - persists across every line of that one
+step; see the "commands" section of Woodpecker's workflow-syntax docs), and
+the stock Debian/Ubuntu images' `/bin/sh` is `dash`, which has no
+`$SECONDS`. Keep both copies' output format (`MmSs`) in sync if either
+changes - there is no way to share the literal code between a sourced bash
+file and inline POSIX `sh` one-liners in YAML.
+
+`fetch-freebsd-deps.py` cannot source a shell helper at all (it is Python);
+it reports its own total elapsed time in the same `MmSs` style via a small
+`format_elapsed()` function, using `time.monotonic()`.
 
 ## FreeBSD cross-compilation: base sysroot gotchas beyond TheHolm/dak's list
 

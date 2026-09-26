@@ -52,6 +52,8 @@ mkdir -p "$dist"
 # scripts/check-package-metadata.sh and NOTES.md.
 "$root/scripts/check-package-metadata.sh" "$root"
 
+. "$root/scripts/lib-timing.sh"
+
 stages=()
 shopt -s nullglob
 for script in "$root"/*/ci-deb.sh; do
@@ -62,6 +64,7 @@ for script in "$root"/*/ci-deb.sh; do
     echo "== $name: building for $target =="
     rm -rf "$stage"
     "$script" "$program_dir/build-$target" "$stage" "$dist" "$revision" "$arch"
+    step_done "$name: total for $target"
     stages+=("$stage")
 done
 
@@ -90,5 +93,6 @@ fi
     --synopsis "All dak-nuggets helper programs, for DAK" \
     --description "Bundles every dak-nuggets helper program (see README.markdown) into a single package." \
     "${bundle_depends[@]}"
+step_done "bundle ($target): total"
 
 echo "== done: individual + bundle .deb packages for $target =="

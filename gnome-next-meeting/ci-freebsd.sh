@@ -30,6 +30,7 @@ root="$(cd "$here/.." && pwd)"
 
 # Same single source of packaging text as ci-deb.sh - see package-metadata.sh.
 . "$here/package-metadata.sh"
+. "$root/scripts/lib-timing.sh"
 
 version="$(grep -m1 "version:" "$here/meson.build" | sed -E "s/.*version:[[:space:]]*'([^']+)'.*/\1/")"
 
@@ -39,6 +40,7 @@ rm -rf "$build_dir"
 meson setup "$build_dir" "$here" --cross-file "$cross_file" --prefix=/usr/local
 meson compile -C "$build_dir"
 DESTDIR="$stage_dir" meson install -C "$build_dir"
+step_done "gnome-next-meeting: cross-compiled for freebsd"
 
 mkdir -p "$dist_dir"
 pkg="$dist_dir/gnome-next-meeting-${version}-freebsd-amd64.pkg"
@@ -53,6 +55,7 @@ python3 "$root/scripts/build-freebsd-pkg.py" \
     --desc "$PKG_DESCRIPTION" \
     --www "https://github.com/TheHolm/dak-nuggets" \
     --output "$pkg"
+step_done "gnome-next-meeting: packaged (.pkg)"
 
 # Fail if the binary did not make it into the .pkg.
 zstd -dc "$pkg" | tar -tf - | grep -qF 'usr/local/bin/gnome-next-meeting'

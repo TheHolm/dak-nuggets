@@ -54,6 +54,17 @@
 # <program>/ci-*.sh are covered too, not just the invocations in this file.
 # Don't remove it as redundant just because the modes happen to be right in
 # git today - see NOTES.md.
+#
+# Every step also defines a `step_done` shell function right after that chmod,
+# printing how long the commands since the previous call (or since the start
+# of the step) took, in the same "MmSs" style as scripts/lib-timing.sh (which
+# the per-program/orchestrator scripts source instead - this inline copy
+# exists because Woodpecker runs each step's commands under the image's
+# default `/bin/sh`, not bash, so `lib-timing.sh`'s bash-only $SECONDS is not
+# available here; `date +%s` is POSIX). This is for narrowing down *within*
+# one CI step where time goes - Woodpecker's own UI/API already reports each
+# step's total start/finish time on its own, with no changes needed here; see
+# NOTES.md.
 
 when:
   - event: tag
@@ -73,11 +84,15 @@ steps:
     commands:
       # File modes are not trusted - see the note in this file's header.
       - chmod +x scripts/*.sh */ci-*.sh
+      # See "Every step also defines a step_done" in this file's header.
+      - step_start=$(date +%s); step_done() { t=$(date +%s); echo "== $1: $(( (t-step_start)/60 ))m$(( (t-step_start)%60 ))s =="; step_start=$t; }
       # Union of every program's build dependencies for this target.
       # ca-certificates must be explicit: cargo fetches crates over HTTPS, and
       # --no-install-recommends drops it (it is only a Recommends). See NOTES.md.
       - apt-get update && apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libglib2.0-dev libecal2.0-dev libedataserver1.2-dev dpkg-dev cargo ca-certificates
+      - step_done "apt-get install"
       - ./scripts/build-target-debs.sh "1~trixie" amd64 trixie
+      - step_done "build-target-debs.sh"
 
   - name: build-deb-ubuntu2604
     image: ubuntu:26.04
@@ -90,9 +105,13 @@ steps:
     commands:
       # File modes are not trusted - see the note in this file's header.
       - chmod +x scripts/*.sh */ci-*.sh
+      # See "Every step also defines a step_done" in this file's header.
+      - step_start=$(date +%s); step_done() { t=$(date +%s); echo "== $1: $(( (t-step_start)/60 ))m$(( (t-step_start)%60 ))s =="; step_start=$t; }
       # Same list as build-deb-trixie, including the explicit ca-certificates.
       - apt-get update && apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libglib2.0-dev libecal2.0-dev libedataserver1.2-dev dpkg-dev cargo ca-certificates
+      - step_done "apt-get install"
       - ./scripts/build-target-debs.sh "1~ubuntu2604" amd64 ubuntu2604
+      - step_done "build-target-debs.sh"
 
   - name: build-freebsd-pkg
     image: debian:trixie-slim
@@ -109,14 +128,18 @@ steps:
     commands:
       # File modes are not trusted - see the note in this file's header.
       - chmod +x scripts/*.sh */ci-*.sh
+      # See "Every step also defines a step_done" in this file's header.
+      - step_start=$(date +%s); step_done() { t=$(date +%s); echo "== $1: $(( (t-step_start)/60 ))m$(( (t-step_start)%60 ))s =="; step_start=$t; }
       # Union of every program's build dependencies for this target.
       - apt-get update && apt-get install -y --no-install-recommends clang lld binutils zstd xz-utils python3 meson ninja-build pkg-config curl ca-certificates
+      - step_done "apt-get install"
       - mkdir -p /opt/freebsd-sysroot
       # FreeBSD base system. Every member needs the leading `./`; extract
       # members explicitly, not via a file list. See TheHolm/dak's NOTES.md
       # section 1.4a - re-verify this list if scripts/check-target-freshness.sh
       # flags the FreeBSD pin as stale (sonames do change between releases).
       - curl -fsSL -o /tmp/base.txz https://download.freebsd.org/releases/amd64/amd64/15.1-RELEASE/base.txz
+      - step_done "download base.txz"
       - >-
         tar -xJf /tmp/base.txz -C /opt/freebsd-sysroot
         ./lib/libc.so.7 ./usr/lib/libc.so ./usr/lib/libc_nonshared.a
@@ -139,6 +162,7 @@ steps:
       # hit either of these: rustc controls its own link line and never asks
       # clang for `-lgcc`, and it needs no C headers at all. See NOTES.md.
       - rm -f /tmp/base.txz
+      - step_done "extract base.txz"
       # Union of every program's FreeBSD dependency closures, fetched from
       # pkg.freebsd.org - see scripts/fetch-freebsd-deps.py. Add one --root
       # per program (plus --pkg-config-check for modules to verify resolve).
@@ -147,6 +171,7 @@ steps:
         --root evolution-data-server
         --pkg-config-check libecal-2.0 --pkg-config-check libedataserver-1.2
         --deps-output /opt/freebsd-deps.json
+      - step_done "fetch-freebsd-deps.py"
       # A generic Meson cross-file for the FreeBSD target, shared by every C
       # program. (A future non-Meson program - Rust, Go, ... - would need its
       # own toolchain setup here; that part can't be shared across languages.)
@@ -160,6 +185,7 @@ steps:
         "c_link_args = ['--target=x86_64-unknown-freebsd15', '--sysroot=/opt/freebsd-sysroot', '-fuse-ld=lld', '-B/opt/freebsd-sysroot/usr/lib']"
         > /opt/freebsd-cross.ini
       - ./scripts/build-target-freebsd.sh /opt/freebsd-cross.ini /opt/freebsd-deps.json
+      - step_done "build-target-freebsd.sh"
 
   - name: publish-github-release
     image: debian:trixie-slim
@@ -175,12 +201,15 @@ steps:
       # step runs no <program>/ci-*.sh, so the glob stays narrow: under /bin/sh
       # an unmatched glob would be passed through literally and fail the step.
       - chmod +x scripts/*.sh
+      # See "Every step also defines a step_done" in this file's header.
+      - step_start=$(date +%s); step_done() { t=$(date +%s); echo "== $1: $(( (t-step_start)/60 ))m$(( (t-step_start)%60 ))s =="; step_start=$t; }
       - apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg
       - mkdir -p -m 755 /etc/apt/keyrings
       - curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
       - chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
       - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
       - apt-get update && apt-get install -y --no-install-recommends gh
+      - step_done "install gh"
       - ./scripts/extract-release-notes.sh "$CI_COMMIT_TAG" RELEASE_NOTES.md > /tmp/release-notes.md
       # Idempotent: create the release, or update it in place when a tag is
       # re-released, so republishing the same tag never fails.
@@ -199,3 +228,4 @@ steps:
             --title "$CI_COMMIT_TAG" \
             --notes-file /tmp/release-notes.md
         fi
+      - step_done "gh release create/upload"

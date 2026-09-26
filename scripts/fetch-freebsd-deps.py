@@ -45,6 +45,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 
@@ -244,8 +245,15 @@ def parse_args(argv: list) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def format_elapsed(seconds: float) -> str:
+    """Format a duration as "MmSs", matching scripts/lib-timing.sh's style."""
+    total = int(seconds)
+    return f"{total // 60}m{total % 60}s"
+
+
 def main(argv: list) -> int:
     """Entry point: fetch the closure and unpack it into `--sysroot`."""
+    start = time.monotonic()
     args = parse_args(argv)
     roots = args.root
     module_map = dict(args.pkg_config_module)
@@ -292,7 +300,7 @@ def main(argv: list) -> int:
 
     print(
         f"unpacked {len(names)} packages ({total / 1e6:.1f} MB) into {args.sysroot} "
-        f"({stubs} pkg-config stubs)"
+        f"({stubs} pkg-config stubs) in {format_elapsed(time.monotonic() - start)}"
     )
     return 0
 

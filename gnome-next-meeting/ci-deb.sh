@@ -34,6 +34,7 @@ root="$(cd "$here/.." && pwd)"
 # package-metadata.sh and NOTES.md. `set -u` above turns a missing variable
 # into a build failure rather than an empty control field.
 . "$here/package-metadata.sh"
+. "$root/scripts/lib-timing.sh"
 
 # NOTE: these runtime package names were verified against Debian trixie. If a
 # target's names/versions differ, the caller sets DEB_DEPENDS (see
@@ -51,6 +52,7 @@ rm -rf "$build_dir"
 meson setup "$build_dir" "$here" --prefix=/usr
 meson compile -C "$build_dir"
 DESTDIR="$stage_dir" meson install -C "$build_dir"
+step_done "gnome-next-meeting: built"
 
 mkdir -p "$dist_dir"
 deb="$dist_dir/gnome-next-meeting_${version}-${revision}_${arch}.deb"
@@ -65,6 +67,7 @@ deb="$dist_dir/gnome-next-meeting_${version}-${revision}_${arch}.deb"
     --synopsis "$PKG_SYNOPSIS" \
     --description "$PKG_DESCRIPTION" \
     --depends "$depends"
+step_done "gnome-next-meeting: packaged (.deb)"
 
 # Fail if the binary did not make it into the .deb.
 dpkg-deb -c "$deb" | grep -qF 'usr/bin/gnome-next-meeting'
