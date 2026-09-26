@@ -15,6 +15,16 @@ works for any program's FreeBSD dependency closure - e.g.
 for gnome-next-meeting, or `--root gtk4 --root libadwaita` for a future
 GTK4/libadwaita helper.
 
+A `--root`'s *declared* runtime dependency closure (what `resolve_closure`
+walks) is not the same thing as the closure a cross-linker actually needs: it
+also includes optional runtime plugins - modules only `dlopen`'d down some
+code path a mere link-time consumer of the library's public API never
+exercises. `--exclude NAME` (repeatable) prunes a named package, and
+anything only reachable through it, from the closure before any downloading
+happens. See NOTES.md for how the current `evolution-data-server` exclude
+list in `release.yaml` was derived from its FreeBSD port's `OPTIONS_DEFAULT`
+- this is not something to guess at from the package names alone.
+
 The repository uses the pkg 2.x layout: `packagesite.pkg` is a zstd tar holding
 `packagesite.yaml` (one JSON manifest per line, each with a `path` under
 `All/Hashed/`), and that `path` is directly downloadable as a normal `.pkg`.
@@ -26,6 +36,7 @@ TheHolm/dak's NOTES.md section 2 for the `.pkg` format itself.
 Usage:
     fetch-freebsd-deps.py --sysroot /opt/freebsd-sysroot \
         --root evolution-data-server \
+        --exclude webkit2-gtk_60 --exclude gtk4 \
         --pkg-config-module evolution-data-server=libecal-2.0 \
         --pkg-config-check libecal-2.0 --pkg-config-check libedataserver-1.2 \
         --deps-output /opt/freebsd-deps.json
@@ -85,8 +96,26 @@ def load_manifests(manifest_path: str) -> dict:
     return packages
 
 
-def resolve_closure(packages: dict, roots: list) -> list:
+def resolve_closure(packages: dict, roots: list, exclude: set = frozenset()) -> list:
     """Return the dependency closure of `roots`, in discovery order.
+
+    `exclude` names packages to prune from the closure, along with anything
+    only reachable *through* them - see the "excluded" branch below, which
+    deliberately does not push the excluded package's own deps onto the
+    stack, matching the "not in repository" branch. A dependency of an
+    excluded package that is *also* reachable via some other, non-excluded
+    path is still included: `seen` dedup is per-name, so once some other path
+    has queued it, exclusion of one of its parents no longer matters.
+
+    This exists because a `pkg`-declared runtime dependency closure (what
+    this function walks) is not the same thing as a cross-linker's closure:
+    it includes optional runtime plugins - e.g. `evolution-data-server`'s
+    OAuth2 sign-in web view - that a program only linking against the
+    library's public API never touches. See NOTES.md for how the current
+    `release.yaml` exclude list for `evolution-data-server` was derived; it
+    is not something this function can determine on its own, because
+    `packagesite.yaml` does not distinguish a link-time dependency from an
+    optional-plugin one.
 
     Raises if a root is missing from the repository; a missing transitive
     dependency is reported on stderr and skipped, so one renamed package does
@@ -100,6 +129,8 @@ def resolve_closure(packages: dict, roots: list) -> list:
         if name in seen:
             continue
         seen.add(name)
+        if name in exclude:
+            continue
         entry = packages.get(name)
         if entry is None:
             if name in roots:
@@ -222,6 +253,16 @@ def parse_args(argv: list) -> argparse.Namespace:
         help="package whose closure to fetch (repeatable, required)",
     )
     parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="package to prune from the closure, along with anything only "
+             "reachable through it (repeatable) - for a --root's optional "
+             "runtime plugins that a mere link-time consumer never touches, "
+             "e.g. an OAuth2 backend's embedded web view; see NOTES.md",
+    )
+    parser.add_argument(
         "--pkg-config-module",
         action="append",
         default=[],
@@ -273,7 +314,7 @@ def main(argv: list) -> int:
             )
 
         packages = load_manifests(manifest_path)
-        names = resolve_closure(packages, roots)
+        names = resolve_closure(packages, roots, exclude=set(args.exclude))
 
         total = 0
         for index, name in enumerate(names, start=1):

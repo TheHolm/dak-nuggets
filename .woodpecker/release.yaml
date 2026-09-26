@@ -166,9 +166,39 @@ steps:
       # Union of every program's FreeBSD dependency closures, fetched from
       # pkg.freebsd.org - see scripts/fetch-freebsd-deps.py. Add one --root
       # per program (plus --pkg-config-check for modules to verify resolve).
+      #
+      # The --exclude list below prunes evolution-data-server's own optional
+      # runtime features that gnome-next-meeting's use of libecal-2.0 /
+      # libedataserver-1.2 never touches. databases/evolution-data-server's
+      # OPTIONS_DEFAULT enables all of these on the official binary package
+      # (confirmed against its Makefile on cgit.freebsd.org, not guessed -
+      # see NOTES.md), and without pruning them the closure balloons to 186
+      # packages / ~737 MB, most of it WebKitGTK (an embedded browser engine
+      # for OAuth2 account sign-in) and GTK4 (needed only by that same OAuth2
+      # feature and by nothing else gnome-next-meeting links against):
+      #   - OAUTH2 (combined with GTK4 on) + GTK4: webkit2-gtk_60, gtk4, and
+      #     everything only reachable through them (GStreamer, ICU, image/font
+      #     codec libs, graphene, vulkan-loader, ...)
+      #   - BDB: db5
+      #   - CANBERRA: libcanberra-gtk3, libcanberra
+      #   - LDAP: openldap26-client (name is version-pinned - re-check
+      #     Mk/bsd.default-versions.mk's OPENLDAP_DEFAULT if this starts
+      #     failing to match anything)
+      #   - WEATHER: libgweather4, geocode-glib2
+      # GSSAPI_BASE (also OPTIONS_DEFAULT) needs no exclude: USES=gssapi:base
+      # links the FreeBSD base system's own Kerberos, adding no package at
+      # all - see Mk/Uses/gssapi.mk.
+      # If evolution-data-server's OPTIONS_DEFAULT changes upstream, re-derive
+      # this list the same way (read the port's Makefile on cgit.freebsd.org)
+      # rather than guessing from package names.
       - >-
         python3 scripts/fetch-freebsd-deps.py --sysroot /opt/freebsd-sysroot
         --root evolution-data-server
+        --exclude webkit2-gtk_60 --exclude gtk4
+        --exclude db5
+        --exclude libcanberra-gtk3 --exclude libcanberra
+        --exclude openldap26-client
+        --exclude libgweather4 --exclude geocode-glib2
         --pkg-config-check libecal-2.0 --pkg-config-check libedataserver-1.2
         --deps-output /opt/freebsd-deps.json
       - step_done "fetch-freebsd-deps.py"
