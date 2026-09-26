@@ -111,6 +111,34 @@ pub fn instance(name: &str, state: Option<State>, since_ms: Option<i64>, now_ms:
     format!("{}\n{}\n{}\n", short_name(name), state_line, time_line)
 }
 
+/// Shown on the detail view's state line when podman itself could not say
+/// which containers exist.
+const UNKNOWN_PODMAN_STATE: &str = "????";
+
+/// Shown on the detail view's name line when podman could not say which
+/// container the slot refers to.
+const UNKNOWN_NAME: &str = "------";
+
+/// The aggregate summary when podman did not answer in time.
+///
+/// podman stalls for seconds behind a container lock while a container is being
+/// removed, and then recovers by itself. The counts are unknown for that
+/// moment, which is not an error worth DAK's red "Error" label: dashes in place
+/// of the numbers say "no information right now", and the next refresh after
+/// podman recovers shows real counts again.
+pub fn counts_unknown() -> String {
+    "run: -\nwait:-\ndone:-\n".to_string()
+}
+
+/// The detail view when podman did not answer in time; see [`counts_unknown`].
+///
+/// Without podman not even the container's name is known, so all three lines
+/// are placeholders. Distinct from a slot that does not exist, which prints
+/// nothing: whether this slot exists cannot be known either.
+pub fn instance_unknown() -> String {
+    format!("{UNKNOWN_NAME}\n{UNKNOWN_PODMAN_STATE}\n{UNKNOWN_TIME}\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +293,26 @@ mod tests {
         for state in [State::Run, State::Wait, State::Done, State::Error] {
             assert_fits(&instance("opencode-verylongname", Some(state), Some(now), now));
         }
+    }
+
+    /// With podman unavailable, the summary keeps its labels and shows a dash
+    /// in place of every number, in the same fixed width.
+    #[test]
+    fn renders_unknown_counts() {
+        let out = counts_unknown();
+        assert_eq!(out, "run: -\nwait:-\ndone:-\n");
+        assert_fits(&out);
+        for line in out.lines() {
+            assert_eq!(line.chars().count(), WIDTH, "{line:?}");
+        }
+    }
+
+    /// With podman unavailable, the detail view is dashes, question marks and
+    /// an unknown time.
+    #[test]
+    fn renders_unknown_instance() {
+        let out = instance_unknown();
+        assert_eq!(out, "------\n????\n--:--\n");
+        assert_fits(&out);
     }
 }

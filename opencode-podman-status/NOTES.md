@@ -573,6 +573,96 @@ existing test calls `OpencodePodmanStatus({})` with no `client`, so
 `client?.app?.log?.()` short-circuits to `undefined` and the old `await` was a
 no-op.
 
+## 6c. podman blocks while a container is removed: time limits and placeholders (0.2.2)
+
+Reported symptom: DAK's button showed "Error" whenever a container was
+terminated. DAK kills a `text_exec` command after 5 s (`EXEC_TIMEOUT` in DAK's
+`src/actions.rs`) and draws "Error"; it does the same for any non-zero exit, and
+it ignores stderr (`run_command_with_timeout`).
+
+**Root cause, reproduced on a Debian 13 VM with rootless podman 5.4.2**: while a
+container is being *removed* (a `--rm` container that has stopped, or
+`podman rm`), podman holds a lock for as long as deleting the container's
+storage takes, and **every** podman command waits for it. Only `podman version`
+answered. Measured, in parallel, with a ~600 MB write layer being deleted:
+
+```
+281 ms    podman version
+14475 ms  podman ps -q --filter name=opencode-a
+14491 ms  podman images -q
+14506 ms  podman ps --format json
+14514 ms  podman container exists opencode-a
+14489 ms  podman inspect --format {{.State.Pid}} opencode-a
+14874 ms  podman info
+```
+
+0.2.1 ran `podman` with `Command::output()`, i.e. with no time limit, so every run
+in that window was killed by DAK at 5 s. How long the window lasts depends on
+the size of the write layer: with an almost empty layer it stays under 100 ms
+and nothing shows. `podman stop` on its own (container kept) never blocked `ps`
+in any test: the container simply drops out of the list.
+
+A second, separate failure on the same path: a container removed *between*
+0.2.1's `podman ps` and its batched `podman inspect` makes `inspect` exit
+non-zero for the whole batch, which failed the run (7 of 8 parallel runs in one
+round on the VM).
+
+**Fix:**
+
+- `discover::run_bounded` runs podman in its own process group (rootless podman
+  re-execs itself) with stdin closed. It reads stdout/stderr on threads into
+  shared buffers, polls `try_wait`, and on the deadline kills the **group** and
+  reaps it. It never waits for pipe EOF past the deadline, and gives an exited
+  podman only a 200 ms grace period to flush, since a leftover process (the
+  rootless pause process) can inherit the pipes. No stray podman processes were
+  left on the VM after repeated kills.
+- Budget, in `main.rs`: `RUN_BUDGET` = 4 s for the whole run. Discovery must
+  finish `PROBE_RESERVE` (1 s) before that, so podman gets 3 s. Each probe's
+  deadline is `min(now + --timeout, run end)`. `probe_all` also stops waiting at
+  the run deadline and reports a probe still running as "probe did not finish
+  in time". Its thread is abandoned and dies with the process. This covers
+  anything a probe does that its own deadline cannot interrupt (reading `/proc`
+  of an exiting process, for example). The 1 s left over is for process start,
+  output and scheduling slack.
+- **A podman timeout is not an error on the DAK-facing modes**
+  (`DiscoverError::TimedOut`): the summary prints `run: -`/`wait:-`/`done:-`,
+  and `--instance` prints `------`/`????`/`--:--`. Both exit 0, with the reason
+  on stderr. The name line is dashes because without podman not even the
+  container's name is known. Any other failure (`DiscoverError::Failed`: podman
+  missing, `ps` failing, unparseable output) is still an error, so a broken
+  setup still shows "Error". `--list` treats a timeout as an error too.
+- PIDs come from `podman ps --format json`'s `Pid` field (present in 5.4.2; 0
+  for a container that is not running, treated as unknown). `inspect` runs only
+  for containers listed without one. When it does run, its stdout is used
+  whatever its exit status, and only the containers missing from it are dropped.
+  An `inspect` failure with no usable output is still an error.
+
+Verified on the VM with the 0.2.2 build, running in a loop through a 15.7 s
+podman stall: every run exited 0 in about 3.0 s printing `run: -`, and the first
+run after the stall showed real counts again (about 90 ms). `--instance` printed
+`------`/`????`/`--:--` with exit 0 in 3006 ms. The vanish race gave 0 failures
+in 9 rounds of 8 parallel runs (0.2.1: 1 in 7). That race is timing-dependent,
+so this is weak evidence on its own; the fake-podman unit test is the real pin.
+
+**Rejected: remembering the last good container list.** A cache file (even on
+tmpfs under `$XDG_RUNTIME_DIR`) was ruled out: the program must store nothing on
+the system between runs. **Also considered: discovering without podman while it
+is blocked**, from our UID's `conmon` processes (`-c <id> -n <name> -p
+<pidfile>` on the command line; the container's main process is conmon's
+child) and c/storage's `overlay-containers/containers.json` (names plus
+`created` in ns) for slot order. It works, but relies on undocumented podman
+internals, and c/storage's creation stamp differs from podman's by about 12 ms,
+so same-second creations could swap slots. The placeholders were preferred.
+
+Tests: `discover.rs` drives `run_bounded`/`discover_with` with fake podman
+scripts, which are run through `/bin/sh` rather than exec'd. Exec'ing a script
+just written fails with `ETXTBSY` whenever another test thread forks while the
+write fd is open. The tests cover a stuck podman whose child must also be
+killed, a detached process holding the pipes, `ps` with/without `Pid`, and
+`inspect` exiting 125 with partial output. `main.rs` drives `run_with` the same
+way (placeholders, exit status, the error cases), and `probe_all_with` with
+injected probes (order, a hung probe, a panicking probe).
+
 ## 7. Rejected approaches, and why
 
 | Approach | Why not |
@@ -630,8 +720,12 @@ no-op.
 - **Never find a service by sending it a request.** See §3a: probing every
   listener to see which one answers is how the first real-use bug happened. Identify
   by ownership from `/proc`, then talk only to what was identified.
+- **Never call podman without a deadline** (§6c). Use `discover::run_bounded`;
+  while a container is being removed podman blocks every command for as long as
+  the storage deletion takes.
 - **Coverage** (`make coverage`) leaves `discover.rs` and `main.rs` out of the
-  table, since both need podman. Everything else, including `ns_socket.rs` and
+  table. Both now have fake-podman tests (§6c), but real discovery still needs
+  podman. Everything else, including `ns_socket.rs` and
   `probe.rs`, is now exercised in-process (the namespace test where nesting is
   permitted).
 - A new netns starts with `lo` **DOWN**. Anything binding `127.0.0.1` inside one
@@ -664,13 +758,13 @@ no-op.
 1. ~~`busy_since_ms` against a genuinely busy session~~ — verified in 0.2.0 with a
    mock provider holding a real turn open: API mode reported `run` with a
    `since_ms` 2 ms from the plugin's own stamp.
-2. **`podman ps --format json` field availability** on the target podman version:
-   whether `Created` is always numeric seconds and whether `.Pid` is present
-   (the code uses a batched `podman inspect` for PIDs and accepts several spellings
-   of `Id`/`Names`/`Created`). No podman is available in the dev container.
-3. **Nine concurrent containers** — behaviour and load with the real thing;
-   two podman invocations total per run regardless of count, but this is untested
-   above one.
+2. ~~**`podman ps --format json` field availability**~~ — verified in 0.2.2 on
+   podman 5.4.2: `Created` is numeric seconds and `Pid` is present, so a normal
+   run is one podman invocation. Older podman versions are still unchecked; for
+   those the code falls back to `inspect` if `Pid` is missing.
+3. **Nine concurrent containers** — behaviour and load with the real thing.
+   Normally one podman invocation per run whatever the count. Tested with three
+   (0.2.2 VM), not nine.
 4. **A container up but not yet listening** — expected to render `----`/`--:--`,
    exercised only by unit tests so far. (Deliberately the same rendering as "no
    opencode in the container" and "no plugin and no `--port`"; `--list` tells

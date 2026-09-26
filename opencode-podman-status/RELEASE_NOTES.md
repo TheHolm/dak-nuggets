@@ -1,5 +1,44 @@
 # Release notes — opencode-podman-status
 
+## v0.2.2
+
+- **Fixed: buttons showed "Error" while a container was being terminated.**
+  While a container is being removed (including a `--rm` container that has
+  just stopped), podman stops answering until its storage is deleted, which
+  can take 15 s or more. The helper waited for podman with no time limit, so
+  DAK killed it after 5 s and drew "Error". Now every run finishes within 4 s.
+  While podman is stuck, the summary button shows `run: -` / `wait:-` /
+  `done:-` and a `--instance` button shows `------` / `????` / `--:--`, both
+  without an error. Real state comes back as soon as podman answers again.
+  If podman is missing or fails outright, that is still reported as an error.
+- **Fixed: a container disappearing at the wrong moment failed the whole run.**
+  A container removed between the helper's two podman calls made the second
+  call fail, and with it every button. The helper now usually makes only one
+  podman call, and if the second call is needed, it drops just the container
+  that vanished.
+
+Details:
+
+- Each podman call runs in its own process group with a deadline. At the
+  deadline the whole group is killed and reaped. The helper does not wait for
+  pipe EOF past the deadline, and an exited podman gets 200 ms to flush.
+- One 4 s budget covers the whole run. Discovery must finish 1 s before the end
+  (so podman gets up to 3 s), and each container's probe deadline is
+  `min(--timeout, time left)`. The parallel probe collector stops waiting at
+  the run deadline and reports any probe still running as failed.
+- A podman timeout (`DiscoverError::TimedOut`) gives placeholders with exit 0
+  and the reason on stderr. Any other podman failure (`Failed`) is still an
+  error, and `--list` reports both kinds as errors.
+- PIDs are taken from `podman ps --format json`'s `Pid` field. `podman inspect`
+  runs only for containers listed without one, and its output is used even when
+  it exits non-zero.
+- The status plugin is unchanged apart from its reported `VERSION`, which
+  follows Cargo.toml.
+- Reproduced and verified on rootless podman 5.4.2; measurements are in
+  `NOTES.md` §6c.
+- `main.rs` and `discover.rs` are now fully `rustfmt`-formatted. That accounts
+  for some formatting-only changes in the diff.
+
 ## v0.2.1
 
 - **Fixed: the status plugin could add ~15-20 s to opencode's own startup.**

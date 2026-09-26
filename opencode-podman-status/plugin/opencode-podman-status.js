@@ -41,7 +41,7 @@ import { createHash, timingSafeEqual } from "node:crypto"
 const MARKER = "opencode-podman-status-plugin"
 
 /** Plugin version, reported in /global/health. Kept in step with Cargo.toml. */
-const VERSION = "0.2.1"
+const VERSION = "0.2.2"
 
 /** Port used when OPENCODE_STATUS_PORT is not set. */
 const DEFAULT_PORT = 4097
