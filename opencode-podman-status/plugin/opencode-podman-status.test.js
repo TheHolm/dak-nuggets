@@ -330,3 +330,59 @@ describe("live listener", () => {
     }
   })
 })
+
+describe("startup never waits on opencode's own API", () => {
+  /**
+   * `client.app.log()` is a real HTTP call back into opencode's own API,
+   * which is not necessarily reachable yet this early in opencode's own
+   * startup. Measured on a real instance: awaiting that call once stalled
+   * opencode's own bootstrap for 15-20 s - opencode awaits every plugin's
+   * returned promise before its next startup step, and nothing else was
+   * logged in between. The plugin must resolve as soon as its listener is
+   * up, whether or not `client.app.log` ever answers.
+   */
+  test("resolves promptly even when client.app.log never resolves", async () => {
+    const SHARED = Symbol.for("opencode-podman-status.shared")
+    delete globalThis[SHARED]
+    const saved = { ...process.env }
+    const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
+    const port = probe.port
+    probe.stop(true)
+    process.env.OPENCODE_STATUS_PORT = String(port)
+    delete process.env.OPENCODE_SERVER_PASSWORD
+    const client = { app: { log: () => new Promise(() => {}) } } // never settles
+    try {
+      const started = Date.now()
+      const hooks = await OpencodePodmanStatus({ client })
+      expect(Date.now() - started).toBeLessThan(1_000)
+      expect(typeof hooks.event).toBe("function")
+      // The listener is genuinely up, not just a promise that resolved empty.
+      expect((await (await fetch(`http://127.0.0.1:${port}/global/health`)).json()).source).toBe(MARKER)
+    } finally {
+      globalThis[SHARED]?.server?.stop(true)
+      delete globalThis[SHARED]
+      process.env = saved
+    }
+  })
+
+  /** Same guarantee when the listener itself fails to bind (port already taken). */
+  test("resolves promptly even when the bind fails and client.app.log never resolves", async () => {
+    const SHARED = Symbol.for("opencode-podman-status.shared")
+    delete globalThis[SHARED]
+    const saved = { ...process.env }
+    const taken = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
+    process.env.OPENCODE_STATUS_PORT = String(taken.port)
+    delete process.env.OPENCODE_SERVER_PASSWORD
+    const client = { app: { log: () => new Promise(() => {}) } } // never settles
+    try {
+      const started = Date.now()
+      const hooks = await OpencodePodmanStatus({ client })
+      expect(Date.now() - started).toBeLessThan(1_000)
+      expect(typeof hooks.event).toBe("function")
+    } finally {
+      taken.stop(true)
+      delete globalThis[SHARED]
+      process.env = saved
+    }
+  })
+})

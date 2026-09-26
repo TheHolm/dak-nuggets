@@ -20,6 +20,18 @@ parses this structure to build each GitHub Release's body, printing from a
 No releases yet - this file gains its first `## vYYYY.MM.DD` entry when the
 first collection-wide tag is cut.
 
+## v2026.09.26-2 — opencode-podman-status 0.2.1
+
+### User-facing changes
+- Fixed: enabling `opencode-podman-status`'s status plugin could add ~15-20 s
+  to opencode's own startup. The plugin no longer waits for its own startup
+  log message (a call back into opencode's own API) before letting opencode
+  continue starting up. No other behaviour changes.
+
+### Details
+- See `opencode-podman-status/RELEASE_NOTES.md` (v0.2.1) and `NOTES.md` (§6b).
+- `gnome-next-meeting` is unchanged and re-released at 0.3.3.
+
 ## v2026.09.26-1 — gnome-next-meeting 0.3.3
 
 ### User-facing changes
