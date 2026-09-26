@@ -1,5 +1,27 @@
 # Release notes — gnome-next-meeting
 
+## v0.3.3
+
+- The FreeBSD `.pkg` declared far more runtime dependencies than
+  `gnome-next-meeting` actually needs: installing it with `pkg install`
+  transitively pulled in the entire WebKitGTK browser engine (an embedded
+  web view used only by `evolution-data-server`'s optional OAuth2
+  account-sign-in feature) plus GTK4, OpenLDAP, `libgweather`, and a few
+  smaller unused pieces - none of which `gnome-next-meeting` links against or
+  needs at runtime, since it only calls `libecal-2.0`'s calendar API and has
+  no GUI at all. The FreeBSD package's declared dependencies are now trimmed
+  to what the binary actually links against; the binary itself is unchanged.
+  This also makes the FreeBSD leg of the release pipeline noticeably faster,
+  since it no longer downloads and unpacks that unnecessary closure.
+- Low-level: `scripts/fetch-freebsd-deps.py` gained a repeatable
+  `--exclude NAME` flag to prune a named package (and anything only
+  reachable through it) from a `--root`'s dependency closure before
+  downloading; `release.yaml`'s `evolution-data-server` closure now excludes
+  `webkit2-gtk_60`, `gtk4`, `db5`, `libcanberra-gtk3`, `libcanberra`,
+  `openldap26-client`, `libgweather4`, and `geocode-glib2`. See NOTES.md for
+  how this list was derived from `databases/evolution-data-server`'s
+  `OPTIONS_DEFAULT` and how to re-derive it if that changes upstream.
+
 ## v0.3.2
 
 - Low-level: the `.deb` installed the binary under `/usr/local/bin` instead of

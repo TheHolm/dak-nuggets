@@ -20,6 +20,20 @@ parses this structure to build each GitHub Release's body, printing from a
 No releases yet - this file gains its first `## vYYYY.MM.DD` entry when the
 first collection-wide tag is cut.
 
+## v2026.09.26-1 — gnome-next-meeting 0.3.3
+
+### User-facing changes
+- `gnome-next-meeting` 0.3.3: its FreeBSD `.pkg` no longer declares a pile of
+  runtime dependencies it does not need - installing it used to transitively
+  pull in the entire WebKitGTK browser engine and GTK4 (both only used by an
+  optional OAuth2 account-sign-in feature of its calendar backend that
+  `gnome-next-meeting` never exercises), plus OpenLDAP and a few smaller
+  unused pieces. The program itself is unchanged.
+
+### Details
+- See `gnome-next-meeting/RELEASE_NOTES.md` (v0.3.3) and `NOTES.md`.
+- `opencode-podman-status` is unchanged and re-released at 0.2.0.
+
 ## v2026.09.26 — opencode-podman-status 0.2.0
 
 ### User-facing changes

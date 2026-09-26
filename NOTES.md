@@ -220,8 +220,15 @@ Generic, language-agnostic tooling:
   for gnome-next-meeting), resolved live against `pkg.freebsd.org`. Ported
   from TheHolm/md_timesheet's `fetch-freebsd-gtk.py`, generalized to take
   `--root`/`--pkg-config-module`/`--pkg-config-check` instead of hardcoding
-  gtk4/libadwaita. This is on top of, not instead of, the base-system sysroot
-  pieces (libc/CRT/headers) extracted from `base.txz` - see below.
+  gtk4/libadwaita, and further generalized with a repeatable `--exclude NAME`
+  to prune a root's optional-runtime-feature packages (and anything only
+  reachable through them) from the closure - see "`evolution-data-server`'s
+  real dependency closure was needlessly large" below for why this exists and
+  how its current exclude list was derived. This is on top of, not instead
+  of, the base-system sysroot pieces (libc/CRT/headers) extracted from
+  `base.txz` - see below. Tests: `scripts/test_fetch_freebsd_deps.py`, run
+  directly with `python3` (not wired into the root Makefile - `scripts/` is
+  shared tooling, not one of the per-program `PROGRAMS`).
 - `extract-release-notes.sh`, `check-target-freshness.sh` - reused verbatim
   from TheHolm/dak; see that repo's own `NOTES.md`/`AGENTS.md` for background.
 - `lib-timing.sh` - sourced (never executed) by the scripts below to report
@@ -337,17 +344,72 @@ in sync with the CI image's clang version. Plain GNU `ar`/`strip` work fine
 on FreeBSD-target objects - archiving and stripping aren't OS-ABI-sensitive
 operations the way linking/compiling are.
 
-## `evolution-data-server`'s real dependency closure is large
+## `evolution-data-server`'s real dependency closure was needlessly large
 
-`--root evolution-data-server` pulls in **186 packages** (~737 MB downloaded,
-~2.1 GB unpacked) from `pkg.freebsd.org` at time of writing - including, non-
+`--root evolution-data-server` used to pull in **186 packages** (~737 MB
+downloaded, ~2.1 GB unpacked) from `pkg.freebsd.org` - including, non-
 obviously, `webkit2-gtk`, `gtk4`, `mesa-libs`, `llvm19`, and even
-`py312-numpy`/`openblas`. This is comparable to or larger than
-TheHolm/md_timesheet's gtk4+libadwaita closure, so the `build-freebsd-pkg` CI
-step is (as expected, and as its own comment in `release.yaml` says) the
-slowest step in the pipeline. This is expected and not a sign anything is
-wrong; `failure: ignore` exists precisely so this doesn't block the Linux
-releases regardless.
+`py312-numpy`/`openblas`. This was filed for a while as "expected, comparable
+to TheHolm/md_timesheet's gtk4+libadwaita closure, not a sign anything is
+wrong" - which undersold it: almost none of that bulk is actually needed to
+*link* against `libecal-2.0`/`libedataserver-1.2`.
+
+The actual cause, found by reading `databases/evolution-data-server`'s
+Makefile on cgit.freebsd.org (the real FreeBSD package name and category -
+neither `deskutils` nor `mail`, despite `evolution` itself living in `mail`;
+traced via `Mk/Uses/gnome.mk`'s `evolutiondataserver3` component, which is
+what `mail/evolution`'s `USE_GNOME` resolves to `databases/evolution-data-server`
+through): its `OPTIONS_DEFAULT` enables `BDB CANBERRA GTK4 LDAP OAUTH2 VAPI
+WEATHER GSSAPI_BASE` on the official binary package, unconditionally, with no
+way to ask pkg.freebsd.org for a build with different options. Two of those
+options account for nearly the entire closure:
+
+- `OAUTH2` - a sign-in web view for Google/Microsoft account setup - combined
+  with `GTK4` being on, adds `LIB_DEPENDS: libwebkitgtk-6.0.so:www/webkit2-gtk@60`
+  (pkg name `webkit2-gtk_60`). WebKitGTK is an entire embedded browser engine:
+  GStreamer and its media codecs, ICU, font/image codec libraries
+  (`woff2`/`brotli`/`webp`/`tiff`), `gtksourceview5`, and more.
+- `GTK4` unconditionally adds `graphene`, `vulkan-loader`, and `gtk4` itself
+  (port `x11-toolkits/gtk40`, `PORTNAME=gtk PKGNAMESUFFIX=4` - pkg name is
+  `gtk4`, *not* `gtk40`; don't guess a pkg name from its port directory name,
+  confirm it from the port's own `Makefile`).
+
+Neither OAuth2 web-view sign-in nor the GTK3-vs-GTK4 API choice have anything
+to do with `gnome-next-meeting`, which only calls `libecal-2.0`'s calendar C
+API - confirmed by checking `libecal-2.0.pc`/`libedataserver-1.2.pc`'s own
+`Requires`/`Requires.private` chain, which pulls in `glib`/`libical`/`libsoup3`/
+etc. but never GTK or WebKit. The other `OPTIONS_DEFAULT` entries add smaller
+but equally unnecessary packages: `BDB` (`db5`), `CANBERRA`
+(`libcanberra-gtk3`, `libcanberra`), `LDAP` (`openldap26-client` - see
+`Mk/Uses/ldap.mk` and `Mk/bsd.default-versions.mk`'s `OPENLDAP_DEFAULT`, which
+is baked into the pkg name and will need updating if that default version
+changes upstream), and `WEATHER` (`libgweather4`, `geocode-glib2`).
+`GSSAPI_BASE` needs no exclude: `USES=gssapi:base` (see `Mk/Uses/gssapi.mk`)
+links the FreeBSD *base system's* own Kerberos and adds no package at all.
+
+**Why this couldn't be fixed by asking `fetch-freebsd-deps.py` to be
+smarter on its own:** `packagesite.yaml`'s `deps` field is `pkg`'s flattened
+*install-time* dependency set - the same one `pkg install` would pull onto a
+real FreeBSD machine - and does not distinguish a LIB_DEPENDS a program
+actually links against from a RUN_DEPENDS that only backs an optional runtime
+feature (a `dlopen`'d plugin, here the OAuth2 web view). There is no
+per-package metadata in the binary repository that lets a generic resolver
+tell those apart; it has to be told explicitly per closure, hence
+`fetch-freebsd-deps.py --exclude NAME` (repeatable): prunes a named package,
+and anything only reachable through it, before any downloading happens. The
+current `release.yaml` invocation for `evolution-data-server` excludes all of
+the above. This is self-verifying, not just a hopeful guess: the existing
+`pkg-config`-resolves check and the actual `ninja` link step in
+`build-target-freebsd.sh` both fail loudly if an exclude turns out to have
+removed something genuinely needed - the residual risk is that
+`build-freebsd-pkg` is `failure: ignore`, so nobody is paged if that happens,
+same as any other FreeBSD-step failure.
+
+If `databases/evolution-data-server`'s `OPTIONS_DEFAULT` changes upstream (or
+a future program needs a different `evolution-data-server` feature that pulls
+in one of these), re-derive the exclude list the same way - read the port's
+current Makefile on cgit.freebsd.org - rather than assuming this list is
+still correct or guessing package names from port directory names.
 
 ## Ubuntu 26.04 package names: verified
 
