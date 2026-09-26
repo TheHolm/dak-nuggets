@@ -292,6 +292,20 @@ file and inline POSIX `sh` one-liners in YAML.
 it reports its own total elapsed time in the same `MmSs` style via a small
 `format_elapsed()` function, using `time.monotonic()`.
 
+**Quote any inline `commands` line containing `{`/`}` or a literal `: `**
+(colon-space): the four inline `step_done` function definitions above
+(`step_done() { ... }`) originally shipped unquoted and parsed fine with
+Python's PyYAML (used to sanity-check this file locally), but Woodpecker's
+own YAML parser rejected them with `cannot unmarshal 'map[...]' ... into a
+string value` - PyYAML is more lenient than Woodpecker's parser about flow
+indicators (`{`, `}`, `[`, `]`, `,`) and colon-space inside an unquoted plain
+scalar in block context; Woodpecker's header comment about "preserv[ing] some
+behavior from [YAML] 1.1" is exactly this stricter behaviour. The fix is to
+wrap the whole command in single quotes (these four have no single quotes in
+their own content, so no escaping is needed). PyYAML validating a change to
+this file locally is therefore not sufficient proof it will pass Woodpecker -
+grep the diff for `{` or a bare `: ` in any newly unquoted plain scalar too.
+
 ## FreeBSD cross-compilation: base sysroot gotchas beyond TheHolm/dak's list
 
 TheHolm/dak's `NOTES.md` section 1.4 documents the base `base.txz` file list

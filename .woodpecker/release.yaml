@@ -85,7 +85,7 @@ steps:
       # File modes are not trusted - see the note in this file's header.
       - chmod +x scripts/*.sh */ci-*.sh
       # See "Every step also defines a step_done" in this file's header.
-      - step_start=$(date +%s); step_done() { t=$(date +%s); echo "== $1: $(( (t-step_start)/60 ))m$(( (t-step_start)%60 ))s =="; step_start=$t; }
+      - 'step_start=$(date +%s); step_done() { t=$(date +%s); echo "== $1: $(( (t-step_start)/60 ))m$(( (t-step_start)%60 ))s =="; step_start=$t; }'
       # Union of every program's build dependencies for this target.
       # ca-certificates must be explicit: cargo fetches crates over HTTPS, and
       # --no-install-recommends drops it (it is only a Recommends). See NOTES.md.
@@ -106,7 +106,7 @@ steps:
       # File modes are not trusted - see the note in this file's header.
       - chmod +x scripts/*.sh */ci-*.sh
       # See "Every step also defines a step_done" in this file's header.
-      - step_start=$(date +%s); step_done() { t=$(date +%s); echo "== $1: $(( (t-step_start)/60 ))m$(( (t-step_start)%60 ))s =="; step_start=$t; }
+      - 'step_start=$(date +%s); step_done() { t=$(date +%s); echo "== $1: $(( (t-step_start)/60 ))m$(( (t-step_start)%60 ))s =="; step_start=$t; }'
       # Same list as build-deb-trixie, including the explicit ca-certificates.
       - apt-get update && apt-get install -y --no-install-recommends build-essential meson ninja-build pkg-config libglib2.0-dev libecal2.0-dev libedataserver1.2-dev dpkg-dev cargo ca-certificates
       - step_done "apt-get install"
@@ -129,7 +129,7 @@ steps:
       # File modes are not trusted - see the note in this file's header.
       - chmod +x scripts/*.sh */ci-*.sh
       # See "Every step also defines a step_done" in this file's header.
-      - step_start=$(date +%s); step_done() { t=$(date +%s); echo "== $1: $(( (t-step_start)/60 ))m$(( (t-step_start)%60 ))s =="; step_start=$t; }
+      - 'step_start=$(date +%s); step_done() { t=$(date +%s); echo "== $1: $(( (t-step_start)/60 ))m$(( (t-step_start)%60 ))s =="; step_start=$t; }'
       # Union of every program's build dependencies for this target.
       - apt-get update && apt-get install -y --no-install-recommends clang lld binutils zstd xz-utils python3 meson ninja-build pkg-config curl ca-certificates
       - step_done "apt-get install"
@@ -232,7 +232,7 @@ steps:
       # an unmatched glob would be passed through literally and fail the step.
       - chmod +x scripts/*.sh
       # See "Every step also defines a step_done" in this file's header.
-      - step_start=$(date +%s); step_done() { t=$(date +%s); echo "== $1: $(( (t-step_start)/60 ))m$(( (t-step_start)%60 ))s =="; step_start=$t; }
+      - 'step_start=$(date +%s); step_done() { t=$(date +%s); echo "== $1: $(( (t-step_start)/60 ))m$(( (t-step_start)%60 ))s =="; step_start=$t; }'
       - apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg
       - mkdir -p -m 755 /etc/apt/keyrings
       - curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
