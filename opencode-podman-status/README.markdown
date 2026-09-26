@@ -44,6 +44,16 @@ Some containers are counted in *none* of the three:
 So the numbers can legitimately add up to less than the number of containers.
 `--list` shows why each one was left out.
 
+While a container is being stopped or removed, podman itself can stop
+answering for several seconds (see [When podman is busy](#when-podman-is-busy)).
+The counts are then unknown and shown as dashes:
+
+```
+run: -
+wait:-
+done:-
+```
+
 ### One container at a time
 
 `--instance` takes a slot number or a container name and prints three lines:
@@ -63,6 +73,9 @@ wait       # run | wait | done | Error | ----
   says which reason it is.
 - A slot that **does not exist prints nothing at all**, so unused DAK buttons
   stay blank.
+- `------` / `????` / `--:--` means podman did not answer in time, so it is not
+  even known which container the slot is
+  ([When podman is busy](#when-podman-is-busy)).
 
 Slots are numbered from 1 by container creation time, oldest first. That is
 stable across runs, which is what a fixed button needs. Terminating a container
@@ -152,7 +165,8 @@ opencode-podman-status [options]
                           OPENCODE_STATUS_PORT in the container changes it).
   --port <n>              Use this port instead of discovering it.
   --timeout <ms>          Time budget per container, all requests included
-                          (default 2500).
+                          (default 2500). Every run also ends within 4 s in
+                          total, podman included, to stay inside DAK's 5 s.
   --password-file <path>  Password for opencode servers started with
                           OPENCODE_SERVER_PASSWORD; one for all containers.
                           The file should be mode 600.
@@ -234,8 +248,29 @@ If opencode is password-protected:
 ```
 
 DAK renders only the first six characters of the first three lines, which is
-exactly what this program emits. Keep `refresh` above `--timeout` (default
-2500 ms) so a slow container cannot cause overlapping invocations.
+exactly what this program emits. Keep `refresh` at 5 s or more: a run can take
+up to 4 s (see below), so a shorter interval can overlap invocations.
+
+### When podman is busy
+
+DAK kills a `text_exec` command that has not finished within 5 s and draws a red
+"Error" on its button. It does the same for any non-zero exit. So every run of
+this program ends within **4 s**, whatever podman and the containers do:
+podman discovery gets up to 3 s of that, and each container's probe
+(`--timeout`, default 2.5 s) is cut short if less time is left.
+
+The budget matters because of podman, not opencode. While a container is being
+removed, including a `--rm` container that has just stopped, podman holds a
+lock for as long as it takes to delete the container's storage, and **every**
+podman command waits for it (`ps`, `inspect`, even `images`). Measured with a
+large write layer, that lasted about 15 s.
+
+During that window the program does not wait for podman. It gives up after
+3 s, prints the dashes shown under [Output](#output), exits 0 (so DAK shows no
+"Error"), and names the reason on stderr. The next refresh after podman
+recovers shows real state again. Any other podman failure, such as podman
+missing or `podman ps` exiting with an error, is still reported as an error.
+`--list` also reports a busy podman as an error, since it is a diagnostic.
 
 ## How it works
 

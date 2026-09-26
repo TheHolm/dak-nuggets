@@ -20,6 +20,20 @@ parses this structure to build each GitHub Release's body, printing from a
 No releases yet - this file gains its first `## vYYYY.MM.DD` entry when the
 first collection-wide tag is cut.
 
+## v2026.09.26-3 — opencode-podman-status 0.2.2
+
+### User-facing changes
+- Fixed: `opencode-podman-status` buttons showed "Error" in DAK while a
+  container was being terminated, because podman stops answering for several
+  seconds then and the helper waited for it past DAK's 5 s limit. Every run now
+  finishes within 4 s. While podman is stuck, buttons show dashes / `????`
+  instead of "Error", and real state returns when podman recovers. A container
+  disappearing mid-run no longer fails the whole run either.
+
+### Details
+- See `opencode-podman-status/RELEASE_NOTES.md` (v0.2.2) and `NOTES.md` (§6c).
+- `gnome-next-meeting` is unchanged and re-released at 0.3.3.
+
 ## v2026.09.26-2 — opencode-podman-status 0.2.1
 
 ### User-facing changes
