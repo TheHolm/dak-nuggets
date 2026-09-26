@@ -40,9 +40,20 @@ pub fn counts(counts: Counts) -> String {
     )
 }
 
+/// Replaces control characters with `?`.
+///
+/// Container names and failure reasons can carry text that originated inside a
+/// container. None of today's sources can contain control characters, but
+/// printing one to a terminal could rewrite what the user sees (ANSI escapes),
+/// so everything displayed goes through here regardless.
+pub fn printable(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
+}
+
 /// Shortens a container name for display.
 ///
-/// Strips a leading `opencode-` and truncates to six characters. A bare
+/// Strips a leading `opencode-`, neutralises control characters, and truncates
+/// to six characters. A bare
 /// `opencode` has no prefix to strip and so renders as `openco`; collisions with
 /// names like `opencode-openconnect` are accepted deliberately, as six
 /// characters cannot disambiguate everything.
@@ -51,7 +62,7 @@ pub fn short_name(container: &str) -> String {
     // A name of exactly "opencode-" would strip to nothing; fall back to the
     // original so the line is never blank.
     let base = if stripped.is_empty() { container } else { stripped };
-    truncate(base, WIDTH)
+    truncate(&printable(base), WIDTH)
 }
 
 /// Truncates to at most `max` characters, respecting character boundaries.
@@ -81,16 +92,16 @@ pub fn hhmm(seconds: i64) -> String {
 
 /// Renders the three-line detail view for a single instance.
 ///
-/// `state` is `None` when the container exists but its API could not be reached,
-/// typically because opencode started without `--port` or is still booting; that
-/// shows as `----`. `since_ms` is when the instance entered its current state, and
+/// `state` is `None` when the container exists but could not be probed,
+/// typically because opencode has neither the status plugin nor `--port`, or is
+/// still booting; that shows as `----`. An error shows as `Error`. `since_ms` is when the instance entered its current state, and
 /// `None` shows as `--:--`.
 ///
 /// The case of a slot that does not exist at all is *not* handled here: the
 /// caller prints nothing, so unused DAK buttons stay blank.
 pub fn instance(name: &str, state: Option<State>, since_ms: Option<i64>, now_ms: i64) -> String {
     let state_line = match state {
-        Some(s) => s.word(),
+        Some(s) => s.label(),
         None => UNKNOWN_STATE,
     };
     let time_line = match (state, since_ms) {
@@ -229,11 +240,29 @@ mod tests {
         assert_fits(&out);
     }
 
+    /// Control characters, including the ESC that starts a terminal escape
+    /// sequence, never survive into displayed text.
+    #[test]
+    fn neutralises_control_characters() {
+        assert_eq!(printable("ok\u{1b}[2Jgone\r\n\t"), "ok?[2Jgone???");
+        assert_eq!(printable("plain \u{e9}"), "plain \u{e9}");
+        assert_eq!(short_name("opencode-\u{1b}[31m"), "?[31m");
+    }
+
+    /// An errored instance says so, capitalised, on its button.
+    #[test]
+    fn renders_error_instance() {
+        let now = 1790308945355;
+        let out = instance("opencode-web", Some(State::Error), Some(now - 3 * 60_000), now);
+        assert_eq!(out, "web\nError\n00:03\n");
+        assert_fits(&out);
+    }
+
     /// Every state word renders within the button width.
     #[test]
     fn all_states_fit_the_button() {
         let now = 1790308945355;
-        for state in [State::Run, State::Wait, State::Done] {
+        for state in [State::Run, State::Wait, State::Done, State::Error] {
             assert_fits(&instance("opencode-verylongname", Some(state), Some(now), now));
         }
     }

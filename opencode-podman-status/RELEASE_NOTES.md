@@ -1,5 +1,100 @@
 # Release notes — opencode-podman-status
 
+## v0.2.0
+
+- **New: read-only status plugin.** Enable
+  `/usr/share/opencode-podman-status/opencode-podman-status.js` in
+  `opencode.json` and run opencode **without `--port`**. `--port` exposes
+  opencode's full remote-control API, through which anything that can reach it
+  can answer permission prompts and run commands with no human check. That
+  includes the agent itself, from inside its own container. The plugin serves
+  only state and timestamps and can change nothing. The README's Security
+  section explains this in full.
+- **New: `Error` state** (plugin only). A turn that failed is shown as `Error`
+  on `--instance` and `error` in `--list`, and is counted on the `wait:` line
+  of the summary. A user abort is not an error.
+- **New: password support** for opencode started with
+  `OPENCODE_SERVER_PASSWORD`, via `--password-file` (recommended) or
+  `--password`, plus `--username`. One password is used for all containers.
+- **New:** `--source auto|plugin|api` and `--plugin-port`. `--list` shows which
+  server answered (`via=`).
+- **Security hardening:** the helper no longer runs any of its own logic inside
+  containers. `--timeout` is now a hard budget for everything one container
+  costs. Responses and request counts are capped. Server-supplied IDs are
+  validated before they are used in requests, and control characters are never
+  printed.
+- **Fixed:** probing a freshly started opencode could time out, because it
+  keeps the connection open after a complete response.
+
+### Implementation detail
+
+- **Namespace transport rewritten** (`src/ns_socket.rs` replaces
+  `src/nsenter.rs`).
+  - Before: a forked child re-executed the program with `__probe` inside the
+    container's user and network namespaces, and reported back JSON. So the
+    whole HTTP and JSON stack ran with the container's user-namespace
+    credentials; it inherited DAK's environment and working directory; it
+    broke when a package upgrade replaced `/proc/self/exe`; and the parent
+    waited on it with no bound.
+  - Now the child makes only raw async-signal-safe syscalls, in order:
+    `PR_SET_DUMPABLE=0`, `setns(user)`, `setns(net)`, 12 × `socket()`, then one
+    `sendmsg` carrying the descriptors via `SCM_RIGHTS` plus a `[stage, errno]`
+    report, then `_exit`. Buffers are prepared before `fork`. The parent owns
+    received descriptors immediately, kills the child on the deadline, and
+    always reaps it.
+  - A socket stays in the namespace it was created in, so the parent connects
+    it (non-blocking, against the deadline) to the container's loopback, and
+    does all HTTP itself without ever changing namespace.
+  - `__probe` is now an unknown argument.
+- **Port discovery** by socket ownership now runs from the host, reading
+  `/proc/<container-pid>/net/tcp{,6}`. It was re-validated as an unprivileged
+  UID.
+- **HTTP client**, `http::Client`, generic over a `Connect` trait:
+  - one absolute deadline, re-applied before every read and write, so a server
+    that drips bytes can't outlast it;
+  - a 1 MiB per-response cap (was 8 MiB, silently truncated) and a 4 MiB byte
+    budget per container;
+  - request paths must be printable ASCII with no spaces;
+  - session IDs must match `[A-Za-z0-9_]{1,64}` before they go into a path, so
+    a crafted `/session/status` can't inject CRLF or steer requests to other
+    routes.
+- **Content-Length framing.** Cold opencode 1.18.32 sends a complete
+  `Content-Length` response and then ignores `Connection: close`. The old
+  "read to EOF" therefore hung until the timeout; this is very likely what the
+  earlier "1500 ms is too short" observation actually was. Malformed,
+  conflicting or over-cap lengths are errors.
+- **Passwords** (`src/auth.rs`):
+  - HTTP Basic, with hand-rolled RFC 4648 base64;
+  - validation: no empty password, no `:` in the username, no control
+    characters;
+  - a warning for group- or other-readable files, a 4 KiB limit, and exactly
+    one trailing newline stripped;
+  - redacted from every `Debug` impl;
+  - HTTP 401 has an explanatory message.
+- **Plugin** (`plugin/opencode-podman-status.js`):
+  - `Bun.serve` on `127.0.0.1` only, port `OPENCODE_STATUS_PORT` (default
+    4097);
+  - GET-only, four routes, with opencode's shapes reduced to type and
+    `since_ms`;
+  - Basic auth mirroring `OPENCODE_SERVER_PASSWORD`, compared in constant time
+    and checked before routing;
+  - state is built from bus events, as measured on 1.18.32. `since_ms` is set
+    only on a real change. An error persists through the idle that follows it.
+    `MessageAbortedError` is ignored. Pending prompts are dropped when their
+    session goes idle, because opencode's own `/permission` keeps aborted
+    prompts forever;
+  - memory is bounded, state is shared per process through `globalThis`, and
+    there is exactly one export (opencode rejects non-function exports);
+  - installed at `/usr/share/opencode-podman-status/` by the `.deb` and under
+    `$PREFIX/share/...` by `make install`;
+  - `make test` runs `bun test` when Bun is present.
+- **Verification:**
+  - tested end to end against real opencode 1.18.32 inside `unshare -Urn`,
+    both the TUI without `--port` and `serve --port` with a password, including
+    permission, question, error, slow-turn and abort sequences;
+  - 170 Rust tests and 24 plugin tests pass;
+  - `tests/namespace-entry.sh` passes both as root and as an unprivileged UID.
+
 ## v0.1.1
 
 - Low-level: the `.deb` installed the binary under `/usr/local/bin` instead of

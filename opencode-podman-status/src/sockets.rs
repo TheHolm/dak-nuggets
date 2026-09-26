@@ -15,13 +15,15 @@
 //!    listening sockets they hold, identify its port exactly.
 //!
 //! Only a port found this way is ever connected to. If opencode is running but
-//! holds no listening socket, it was started without `--port`, and that is
-//! reported as such.
+//! holds no listening socket, neither the status plugin nor `--port` is in use,
+//! and that is reported as such.
 //!
-//! This runs inside the container's namespaces (see [`crate::nsenter`]), so
-//! `/proc/net/tcp` is the container's table. `/proc` itself is still the host's
-//! mount, so PIDs are host PIDs; processes are matched to the container by
-//! comparing network namespace identity.
+//! All of this runs **on the host**, without entering any namespace:
+//! `/proc/<pid>/net/tcp` is the TCP table of *that process's* network namespace,
+//! so reading it for the container's main PID gives the container's table. PIDs
+//! are host PIDs throughout, and processes are matched to the container by
+//! comparing network namespace identity. (Verified as an unprivileged user
+//! against a rootless-style nested namespace - see NOTES.md.)
 
 use std::collections::HashSet;
 use std::fs;
@@ -132,7 +134,8 @@ pub enum Discovery {
     Found(Vec<u16>),
     /// No opencode process in this network namespace.
     NotRunning,
-    /// opencode is running but holds no listening socket - started without `--port`.
+    /// opencode is running but holds no listening socket: neither the status
+    /// plugin nor `--port` is in use.
     NotListening,
     /// opencode is running, but its open files could not be inspected.
     Unreadable(String),
@@ -145,30 +148,37 @@ impl Discovery {
             Discovery::Found(_) => String::new(),
             Discovery::NotRunning => "opencode is not running in this container".to_string(),
             Discovery::NotListening => {
-                "opencode is running without --port, so it has no API socket".to_string()
+                "opencode is running but listens on nothing: enable the status plugin \
+                 (see README.markdown)"
+                    .to_string()
             }
             Discovery::Unreadable(e) => format!("cannot inspect opencode's sockets: {e}"),
         }
     }
 }
 
-/// Reads this process's own network namespace identity.
-fn own_netns() -> Option<String> {
-    fs::read_link("/proc/self/ns/net")
+/// Reads a process's network namespace identity.
+fn netns_of(pid: i32) -> Option<String> {
+    fs::read_link(format!("/proc/{pid}/ns/net"))
         .ok()
         .map(|p| p.to_string_lossy().into_owned())
 }
 
-/// Reads every listening socket visible in this network namespace.
+/// Paths of the IPv4 and IPv6 TCP tables of `pid`'s network namespace.
+fn tcp_table_paths(pid: i32) -> (String, String) {
+    (format!("/proc/{pid}/net/tcp"), format!("/proc/{pid}/net/tcp6"))
+}
+
+/// Reads every listening socket in `pid`'s network namespace.
 ///
-/// `/proc/net` resolves to the calling task's network namespace, so inside the
-/// container these are the container's sockets. `tcp6` may be absent on a host
-/// without IPv6, which is not an error.
-fn read_listeners() -> Result<Vec<Listener>, String> {
-    let v4 = fs::read_to_string("/proc/net/tcp")
-        .map_err(|e| format!("cannot read /proc/net/tcp: {e}"))?;
+/// `/proc/<pid>/net` resolves to that process's network namespace, so for a
+/// container's main PID these are the container's sockets, read from outside.
+/// `tcp6` may be absent on a host without IPv6, which is not an error.
+fn read_listeners(pid: i32) -> Result<Vec<Listener>, String> {
+    let (v4_path, v6_path) = tcp_table_paths(pid);
+    let v4 = fs::read_to_string(&v4_path).map_err(|e| format!("cannot read {v4_path}: {e}"))?;
     let mut listeners = parse_listeners(&v4);
-    if let Ok(v6) = fs::read_to_string("/proc/net/tcp6") {
+    if let Ok(v6) = fs::read_to_string(&v6_path) {
         listeners.extend(parse_listeners(&v6));
     }
     Ok(listeners)
@@ -187,18 +197,21 @@ fn socket_inodes_of(pid: &str, into: &mut HashSet<u64>) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Finds opencode's listening ports in the current network namespace.
+/// Finds opencode's listening ports in the network namespace of `container_pid`.
 ///
-/// Scans `/proc` for processes that share this network namespace and are
+/// Scans `/proc` for processes that share that network namespace and are
 /// opencode, gathers the socket inodes they hold, and keeps only the listeners
-/// whose inode is among them. Nothing is connected to.
-pub fn discover() -> Discovery {
-    let listeners = match read_listeners() {
+/// whose inode is among them. Nothing is connected to, and no namespace is
+/// entered.
+pub fn discover(container_pid: i32) -> Discovery {
+    let listeners = match read_listeners(container_pid) {
         Ok(l) => l,
         Err(e) => return Discovery::Unreadable(e),
     };
-    let Some(ours) = own_netns() else {
-        return Discovery::Unreadable("cannot read own network namespace".to_string());
+    let Some(ours) = netns_of(container_pid) else {
+        return Discovery::Unreadable(format!(
+            "cannot read the network namespace of pid {container_pid}"
+        ));
     };
     let entries = match fs::read_dir("/proc") {
         Ok(e) => e,
@@ -394,16 +407,32 @@ mod tests {
     #[test]
     fn discovery_reasons_are_specific() {
         assert!(Discovery::NotRunning.reason().contains("not running"));
-        assert!(Discovery::NotListening.reason().contains("--port"));
+        assert!(Discovery::NotListening.reason().contains("status plugin"));
         assert!(Discovery::Unreadable("boom".into()).reason().contains("boom"));
         assert_eq!(Discovery::Found(vec![4096]).reason(), "");
     }
 
-    /// The live scan runs in the test's own namespace without panicking. What it
-    /// finds depends on the machine, so only the shape is asserted: this test
-    /// process is not opencode, so it must never report its own sockets.
+    /// The TCP tables are read per process, which is what lets discovery run on
+    /// the host against a container's PID.
+    #[test]
+    fn reads_tables_of_the_given_process() {
+        assert_eq!(
+            tcp_table_paths(1234),
+            ("/proc/1234/net/tcp".to_string(), "/proc/1234/net/tcp6".to_string())
+        );
+    }
+
+    /// The live scan against our own PID runs without panicking. What it finds
+    /// depends on the machine (an opencode may well share this namespace), so
+    /// only the shape is asserted.
     #[test]
     fn live_discovery_does_not_panic() {
-        let _ = discover();
+        let _ = discover(std::process::id() as i32);
+    }
+
+    /// A PID that does not exist is reported as unreadable, not as "not running".
+    #[test]
+    fn discovery_of_missing_pid_is_unreadable() {
+        assert!(matches!(discover(0), Discovery::Unreadable(_)));
     }
 }

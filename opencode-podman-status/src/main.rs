@@ -2,41 +2,52 @@
 //!
 //! See README.markdown for usage and NOTES.md for why it works the way it does.
 
+mod auth;
 mod discover;
 mod http;
 mod ident;
-mod nsenter;
+mod ns_socket;
 mod probe;
 mod render;
 mod sockets;
 mod status;
 
 use std::process::ExitCode;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use discover::Container;
-use probe::Report;
+use probe::{Report, Source};
+use sockets::Discovery;
 use status::{Counts, State};
 
 /// Program name used in messages.
 const PROGRAM: &str = "opencode-podman-status";
 
-/// Argument that puts the program into its in-namespace probe mode.
-///
-/// Double-underscored because it is internal: the parent re-executes itself with
-/// it after entering a container's namespaces. Not documented for users.
-const PROBE_ARG: &str = "__probe";
-
-/// Default per-request timeout.
+/// Default time budget for probing one container.
 ///
 /// DAK re-invokes this program on a timer, so a wedged container must never hold
-/// it up. Measured against opencode 1.18.32: a warm request costs 1.5-5 ms, and
-/// the first `/session/status` after startup around 360 ms - but an instance
-/// probed the moment `/global/health` starts answering can be slower still, which
-/// an earlier 1500 ms default was observed to trip over. 2500 ms leaves a wide
-/// margin while staying under any sensible DAK refresh interval; probes run in
-/// parallel, so this bounds the whole run, not each container.
+/// it up. This is a hard deadline for *everything* one container costs -
+/// entering its namespace and every request and response - not a per-read
+/// timeout, so a server that drips bytes cannot stretch it. Measured against
+/// opencode 1.18.32: a warm request costs 1.5-5 ms, and the first
+/// `/session/status` after startup around 360 ms - but an instance probed the
+/// moment `/global/health` starts answering can be slower still, which an
+/// earlier 1500 ms default was observed to trip over. 2500 ms leaves a wide
+/// margin while staying under any sensible DAK refresh interval; containers are
+/// probed in parallel, so this also bounds the whole run.
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(2500);
+
+/// Most bytes read from one container across all its responses.
+///
+/// A handful of requests of a few KiB each is normal; this only stops a hostile
+/// server making a nine-container run cost gigabytes.
+const BYTE_BUDGET: usize = 4 * http::MAX_RESPONSE;
+
+/// Sockets fetched from each container's namespace, which is also the most
+/// requests one container can cost: health, three status endpoints, up to four
+/// busy sessions' latest messages or the session list, with room for a second
+/// candidate port.
+const SOCKETS_PER_CONTAINER: usize = 12;
 
 /// What the user asked for.
 #[derive(Debug)]
@@ -53,12 +64,29 @@ enum Mode {
     /// does it say" without depending on podman listing it. Also what the
     /// namespace-entry integration test drives.
     Pid(i32),
-    /// In-namespace probe of a single instance.
-    Probe,
     /// Usage text.
     Help,
     /// Version string.
     Version,
+}
+
+/// Where the server password comes from.
+#[derive(Clone, PartialEq, Eq)]
+enum PasswordSource {
+    /// Given directly with `--password` (visible in `ps`).
+    Argument(String),
+    /// Read from the file named with `--password-file`.
+    File(String),
+}
+
+impl std::fmt::Debug for PasswordSource {
+    /// Never shows a command-line password; a file path is harmless to show.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PasswordSource::Argument(_) => f.write_str("Argument(<redacted>)"),
+            PasswordSource::File(path) => f.debug_tuple("File").field(path).finish(),
+        }
+    }
 }
 
 /// Parsed command line.
@@ -67,12 +95,31 @@ struct Options {
     mode: Mode,
     /// Skip port discovery and use this port.
     port: Option<u16>,
+    /// Which kind of server to take the state from.
+    source: Source,
+    /// Port the status plugin listens on inside each container.
+    plugin_port: u16,
     timeout: Duration,
+    /// Password for opencode's server, if it was started with one.
+    password: Option<PasswordSource>,
+    /// Username to go with the password; `opencode` if not given.
+    username: Option<String>,
+    /// The resolved credentials, filled in by [`resolve_credentials`].
+    credentials: Option<auth::Credentials>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { mode: Mode::Counts, port: None, timeout: DEFAULT_TIMEOUT }
+        Options {
+            mode: Mode::Counts,
+            port: None,
+            source: Source::Auto,
+            plugin_port: probe::DEFAULT_PLUGIN_PORT,
+            timeout: DEFAULT_TIMEOUT,
+            password: None,
+            username: None,
+            credentials: None,
+        }
     }
 }
 
@@ -84,25 +131,43 @@ Reports what each opencode instance running in a rootless podman container is
 doing. With no options, prints three six-character lines for a DAK button:
 
     run: 3      instances working
-    wait:1      instances waiting for an answer from you
+    wait:1      instances waiting for you: a question, a permission
+                prompt, or (status plugin only) a failed turn
     done:5      instances idle
 
 Options:
-  --instance <slot|name>  Detail for one container: name, state, time in state.
-                          Prints nothing at all if that slot does not exist.
+  --instance <slot|name>  Detail for one container: name, state (run, wait,
+                          done, or Error), time in state. Prints nothing at
+                          all if that slot does not exist.
   --list                  Diagnostic table of every container (not for DAK).
   --pid <n>               Diagnostic: probe this process's namespaces directly,
                           bypassing podman, and print the raw JSON report.
+  --source <auto|plugin|api>
+                          Take the state from the status plugin, from
+                          opencode's own API, or (auto, the default) from the
+                          plugin when present and the API otherwise.
+  --plugin-port <n>       Port the status plugin listens on (default 4097;
+                          OPENCODE_STATUS_PORT in the container changes it).
   --port <n>              Use this port instead of discovering it.
-  --timeout <ms>          Per-request timeout (default 2500).
+  --timeout <ms>          Time budget per container, all requests included
+                          (default 2500).
+  --password-file <path>  Password for opencode servers started with
+                          OPENCODE_SERVER_PASSWORD; one for all containers.
+                          The file should be mode 600.
+  --password <pw>         The same, given directly. Visible to every local
+                          user via ps(1) - prefer --password-file.
+  --username <name>       Username for the above (default opencode).
   -h, --help              This text.
   -V, --version           Version.
 
-Each container must run opencode with an explicit --port, for example
-`opencode --port 4096`; the same port in every container is fine. Setting
-server.port in opencode.json does NOT work - see README.markdown.
+Recommended: enable the status plugin in each container's opencode.json and
+run opencode WITHOUT --port. `opencode --port` exposes opencode's full
+remote-control API, through which anything reaching the port - including the
+agent's own tools in the container - can approve its own permission prompts
+and run commands without any human check. See README.markdown.
 
-Linux only: it works by entering a rootless podman container's namespaces.
+Linux only: it works by creating sockets in rootless podman containers'
+network namespaces.
 ";
 
 /// Parses arguments, hand-rolled to avoid a dependency for six flags.
@@ -120,7 +185,6 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
 
     while index < args.len() {
         match args[index].as_str() {
-            PROBE_ARG => options.mode = Mode::Probe,
             "--instance" => {
                 let v = value(args, &mut index, "--instance")?.to_string();
                 options.mode = Mode::Instance(v);
@@ -134,6 +198,17 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 }
                 options.mode = Mode::Pid(pid);
             }
+            "--source" => {
+                let v = value(args, &mut index, "--source")?;
+                options.source = Source::parse(v).ok_or_else(|| format!("invalid source: {v}"))?;
+            }
+            "--plugin-port" => {
+                let v = value(args, &mut index, "--plugin-port")?;
+                options.plugin_port = match v.parse() {
+                    Ok(p) if p != 0 => p,
+                    _ => return Err(format!("invalid plugin port: {v}")),
+                };
+            }
             "--port" => {
                 let v = value(args, &mut index, "--port")?;
                 options.port = Some(v.parse().map_err(|_| format!("invalid port: {v}"))?);
@@ -143,13 +218,50 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 let ms: u64 = v.parse().map_err(|_| format!("invalid timeout: {v}"))?;
                 options.timeout = Duration::from_millis(ms);
             }
+            "--password" => {
+                let v = value(args, &mut index, "--password")?;
+                set_password(&mut options, PasswordSource::Argument(v.to_string()))?;
+            }
+            "--password-file" => {
+                let v = value(args, &mut index, "--password-file")?;
+                set_password(&mut options, PasswordSource::File(v.to_string()))?;
+            }
+            "--username" => {
+                options.username = Some(value(args, &mut index, "--username")?.to_string());
+            }
             "-h" | "--help" => options.mode = Mode::Help,
             "-V" | "--version" => options.mode = Mode::Version,
             other => return Err(format!("unknown argument: {other}")),
         }
         index += 1;
     }
+    if options.username.is_some() && options.password.is_none() {
+        return Err("--username needs --password or --password-file".to_string());
+    }
     Ok(options)
+}
+
+/// Records the password source, refusing a second one.
+fn set_password(options: &mut Options, source: PasswordSource) -> Result<(), String> {
+    if options.password.is_some() {
+        return Err("give only one of --password and --password-file, once".to_string());
+    }
+    options.password = Some(source);
+    Ok(())
+}
+
+/// Turns the password options into credentials, reading the file if one was named.
+///
+/// Returns any warning (a password file others can read) for the caller to show.
+fn resolve_credentials(options: &mut Options) -> Result<Option<String>, String> {
+    let (password, warning) = match &options.password {
+        None => return Ok(None),
+        Some(PasswordSource::Argument(pw)) => (pw.clone(), None),
+        Some(PasswordSource::File(path)) => auth::read_password_file(path)?,
+    };
+    let username = options.username.as_deref().unwrap_or(auth::DEFAULT_USERNAME);
+    options.credentials = Some(auth::Credentials::new(username, &password)?);
+    Ok(warning)
 }
 
 /// Current time in Unix milliseconds.
@@ -160,27 +272,39 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Probes one container by entering its namespaces and re-executing ourselves.
+/// Probes one container, entirely from outside it.
+///
+/// 1. Finds opencode's port by socket ownership, reading the container's
+///    `/proc` tables from the host (unless `--port` names it).
+/// 2. Has a short-lived child create sockets inside the container's network
+///    namespace and hand them back (see [`ns_socket`]).
+/// 3. Talks HTTP over those sockets from this process, within one deadline.
 ///
 /// Returns a [`Report`] in every case, including failure, so the caller always has
 /// something to render.
 fn probe_container(container: &Container, options: &Options) -> Report {
+    let deadline = Instant::now() + options.timeout;
     let pid = match container.pid {
         Some(pid) => pid,
         None => return Report::failed("container has no running process"),
     };
 
-    if nsenter::shares_our_namespace(pid) {
+    if ns_socket::shares_our_namespace(pid) {
         return Report::failed("shares our network namespace (are we inside it?)");
     }
 
-    let exe = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(e) => return Report::failed(format!("cannot find own executable: {e}")),
+    let ports = match options.port {
+        Some(port) => vec![port],
+        None => match sockets::discover(pid) {
+            Discovery::Found(ports) => {
+                probe::order_candidates(&ports, options.plugin_port, options.source)
+            }
+            other => return Report::failed(other.reason()),
+        },
     };
 
-    let mut command = match nsenter::command_in_namespaces(pid, &exe.to_string_lossy()) {
-        Ok(command) => command,
+    let namespaces = match ns_socket::Namespaces::open(pid) {
+        Ok(ns) => ns,
         Err(e) => {
             return Report::failed(format!(
                 "cannot open namespaces of pid {pid}: {e} \
@@ -188,40 +312,23 @@ fn probe_container(container: &Container, options: &Options) -> Report {
             ))
         }
     };
-
-    command.arg(PROBE_ARG);
-    command.arg("--timeout").arg(options.timeout.as_millis().to_string());
-    if let Some(port) = options.port {
-        command.arg("--port").arg(port.to_string());
-    }
-
-    let output = match command.output() {
-        Ok(output) => output,
-        Err(e) => return Report::failed(format!("probe failed to run: {e}")),
+    let sockets = match namespaces.sockets(SOCKETS_PER_CONTAINER, deadline) {
+        Ok(sockets) => sockets,
+        Err(e) => return Report::failed(format!("cannot enter namespaces of pid {pid}: {e}")),
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let detail = if stderr.is_empty() { "no output".to_string() } else { stderr };
-        return Report::failed(format!("probe exited unsuccessfully: {detail}"));
-    }
-
-    match serde_json::from_slice::<Report>(&output.stdout) {
-        Ok(report) => report,
-        Err(e) => Report::failed(format!("unreadable probe output: {e}")),
-    }
+    let mut client = http::Client::new(http::Pool(sockets), deadline, BYTE_BUDGET)
+        .with_credentials(options.credentials.as_ref());
+    probe::run(&mut client, &ports, options.source, now_ms())
 }
 
 /// Probes every container, in parallel, and pairs each with its report.
 ///
-/// Parallel by process rather than by thread: each probe is a child that must be
-/// single-threaded to call `setns`, so they are all spawned, then all collected.
-/// Nine containers therefore cost roughly one probe's latency, not nine.
+/// One thread per container, so nine containers cost roughly one probe's
+/// latency, not nine. Each thread's namespace work happens in a child it forks,
+/// which starts single-threaded whatever the parent is - that is what `setns`
+/// requires - and each thread is bounded by its container's deadline.
 fn probe_all(containers: &[Container], options: &Options) -> Vec<(Container, Report)> {
-    // Spawning is cheap and the work is in waiting, so a plain sequential
-    // spawn-then-collect would serialise. Use scoped threads purely to overlap
-    // the waiting; each thread's child is still forked single-threaded by the
-    // kernel, which is what setns cares about.
     std::thread::scope(|scope| {
         let handles: Vec<_> = containers
             .iter()
@@ -253,6 +360,9 @@ fn select_instance<'a>(
 }
 
 /// Renders the diagnostic table.
+///
+/// Names and reasons are passed through [`render::printable`]: a reason can quote
+/// text a container's server sent back, and this goes to a terminal.
 fn render_list(results: &[(Container, Report)], now: i64) -> String {
     let mut out = String::new();
     for (container, report) in results {
@@ -262,15 +372,17 @@ fn render_list(results: &[(Container, Report)], now: i64) -> String {
             _ => "--:--".to_string(),
         };
         let port = report.port.map_or_else(|| "-".to_string(), |p| p.to_string());
-        let note = report.reason.as_deref().unwrap_or("");
+        let source = render::printable(report.source.as_deref().unwrap_or("-"));
+        let note = render::printable(report.reason.as_deref().unwrap_or(""));
         out.push_str(&format!(
-            "{:>2}  {:<24} {:<8} {:<6} pid={:<8} port={:<6} {}\n",
+            "{:>2}  {:<24} {:<8} {:<6} pid={:<8} port={:<6} via={:<7} {}\n",
             container.slot,
-            container.name,
+            render::printable(&container.name),
             state,
             age,
             container.pid.unwrap_or(0),
             port,
+            source,
             note
         ));
     }
@@ -284,13 +396,6 @@ fn run(options: Options) -> Result<String, String> {
     match &options.mode {
         Mode::Help => Ok(USAGE.to_string()),
         Mode::Version => Ok(format!("{PROGRAM} {}\n", env!("CARGO_PKG_VERSION"))),
-
-        Mode::Probe => {
-            let report = probe::run(options.port, options.timeout, now);
-            let json = serde_json::to_string(&report)
-                .map_err(|e| format!("cannot serialise report: {e}"))?;
-            Ok(format!("{json}\n"))
-        }
 
         Mode::Counts => {
             let containers = discover::discover()?;
@@ -344,7 +449,7 @@ fn run(options: Options) -> Result<String, String> {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    let options = match parse_args(&args) {
+    let mut options = match parse_args(&args) {
         Ok(options) => options,
         Err(e) => {
             eprintln!("{PROGRAM}: {e}");
@@ -352,6 +457,15 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    match resolve_credentials(&mut options) {
+        Ok(Some(warning)) => eprintln!("{PROGRAM}: {warning}"),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("{PROGRAM}: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
 
     match run(options) {
         Ok(output) => {
@@ -400,7 +514,8 @@ mod tests {
     #[test]
     fn parses_other_modes() {
         assert!(matches!(parse_args(&args(&["--list"])).unwrap().mode, Mode::List));
-        assert!(matches!(parse_args(&args(&["__probe"])).unwrap().mode, Mode::Probe));
+        // The internal re-exec mode of earlier versions is gone for good.
+        assert!(parse_args(&args(&["__probe"])).is_err());
         assert!(matches!(parse_args(&args(&["--help"])).unwrap().mode, Mode::Help));
         assert!(matches!(parse_args(&args(&["-h"])).unwrap().mode, Mode::Help));
         assert!(matches!(parse_args(&args(&["--version"])).unwrap().mode, Mode::Version));
@@ -444,6 +559,56 @@ mod tests {
         assert!(parse_args(&args(&["--nonsense"])).is_err());
     }
 
+    /// Either password option is accepted, with an optional username.
+    #[test]
+    fn parses_password_options() {
+        let o = parse_args(&args(&["--password", "pw"])).unwrap();
+        assert_eq!(o.password, Some(PasswordSource::Argument("pw".into())));
+        let o = parse_args(&args(&["--password-file", "/p", "--username", "me"])).unwrap();
+        assert_eq!(o.password, Some(PasswordSource::File("/p".into())));
+        assert_eq!(o.username.as_deref(), Some("me"));
+    }
+
+    /// Conflicting or incomplete password options are refused.
+    #[test]
+    fn rejects_bad_password_options() {
+        assert!(parse_args(&args(&["--password", "a", "--password-file", "/p"])).is_err());
+        assert!(parse_args(&args(&["--password", "a", "--password", "b"])).is_err());
+        assert!(parse_args(&args(&["--username", "me"])).is_err());
+        assert!(parse_args(&args(&["--password"])).is_err());
+        assert!(parse_args(&args(&["--password-file"])).is_err());
+    }
+
+    /// A command-line password never shows up in debug output of the options.
+    #[test]
+    fn options_debug_redacts_password() {
+        let mut o = parse_args(&args(&["--password", "hunter2"])).unwrap();
+        resolve_credentials(&mut o).unwrap();
+        let shown = format!("{o:?}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+    }
+
+    /// Credentials resolve with the default username, or the one given.
+    #[test]
+    fn resolves_credentials() {
+        let mut o = parse_args(&args(&["--password", "pw"])).unwrap();
+        assert_eq!(resolve_credentials(&mut o), Ok(None));
+        assert_eq!(o.credentials, Some(auth::Credentials::new("opencode", "pw").unwrap()));
+
+        let mut o = parse_args(&args(&["--password", "pw", "--username", "me"])).unwrap();
+        resolve_credentials(&mut o).unwrap();
+        assert_eq!(o.credentials, Some(auth::Credentials::new("me", "pw").unwrap()));
+
+        let mut o = parse_args(&args(&[])).unwrap();
+        assert_eq!(resolve_credentials(&mut o), Ok(None));
+        assert_eq!(o.credentials, None);
+
+        let mut o = parse_args(&args(&["--password", ""])).unwrap();
+        assert!(resolve_credentials(&mut o).is_err());
+        let mut o = parse_args(&args(&["--password-file", "/nonexistent/pw"])).unwrap();
+        assert!(resolve_credentials(&mut o).is_err());
+    }
+
     /// Builds a container/report pair for selection tests.
     fn pair(slot: usize, name: &str, state: Option<&str>) -> (Container, Report) {
         (
@@ -456,6 +621,7 @@ mod tests {
             },
             Report {
                 port: Some(4096),
+                source: Some("plugin".to_string()),
                 state: state.map(|s| s.to_string()),
                 since_ms: Some(1790308945355),
                 reason: None,
@@ -527,7 +693,16 @@ mod tests {
         assert!(lines[1].contains("no listening socket"));
     }
 
-    /// An empty table is empty output, not a header with nothing under it.
+    /// Escape sequences in a name or reason cannot reach the terminal.
+    #[test]
+    fn list_neutralises_control_characters() {
+        let mut row = pair(1, "opencode-\u{1b}[2J", None);
+        row.1 = Report::failed("bad \u{1b}]0;title\u{7}");
+        let out = render_list(&[row], 1790308945355);
+        assert!(!out.contains('\u{1b}') && !out.contains('\u{7}'), "{out:?}");
+    }
+
+        /// An empty table is empty output, not a header with nothing under it.
     #[test]
     fn list_of_nothing_is_empty() {
         assert_eq!(render_list(&[], 1790308945355), "");
@@ -544,11 +719,34 @@ mod tests {
         assert!(version.contains(PROGRAM));
     }
 
-    /// The usage text documents the --port requirement, which is the single most
-    /// common reason the program reports nothing useful.
+    /// The usage text recommends the plugin and warns what `--port` gives away.
     #[test]
-    fn usage_documents_the_port_requirement() {
-        assert!(USAGE.contains("--port 4096"));
-        assert!(USAGE.contains("server.port"));
+    fn usage_warns_about_port_and_recommends_plugin() {
+        assert!(USAGE.contains("status plugin"));
+        assert!(USAGE.contains("WITHOUT --port"));
+        assert!(USAGE.contains("without any human check"));
+    }
+
+    /// `--source` and `--plugin-port` parse, defaulting to auto and 4097.
+    #[test]
+    fn parses_source_options() {
+        let o = parse_args(&args(&[])).unwrap();
+        assert_eq!(o.source, Source::Auto);
+        assert_eq!(o.plugin_port, 4097);
+        let o = parse_args(&args(&["--source", "api", "--plugin-port", "5000"])).unwrap();
+        assert_eq!(o.source, Source::Api);
+        assert_eq!(o.plugin_port, 5000);
+        assert!(parse_args(&args(&["--source", "both"])).is_err());
+        assert!(parse_args(&args(&["--plugin-port", "0"])).is_err());
+        assert!(parse_args(&args(&["--plugin-port", "x"])).is_err());
+        assert!(parse_args(&args(&["--source"])).is_err());
+    }
+
+    /// An errored instance is listed as `error`, with what answered.
+    #[test]
+    fn list_shows_error_and_source() {
+        let out = render_list(&[pair(1, "opencode-web", Some("error"))], 1790308945355);
+        assert!(out.contains(" error "), "{out}");
+        assert!(out.contains("via=plugin"), "{out}");
     }
 }

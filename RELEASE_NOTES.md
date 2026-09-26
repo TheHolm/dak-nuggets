@@ -20,6 +20,20 @@ parses this structure to build each GitHub Release's body, printing from a
 No releases yet - this file gains its first `## vYYYY.MM.DD` entry when the
 first collection-wide tag is cut.
 
+## v2026.09.26 — opencode-podman-status 0.2.0
+
+### User-facing changes
+- `opencode-podman-status` 0.2.0 ships a read-only opencode status plugin, so
+  containers no longer need `opencode --port`. `--port` exposes opencode's full
+  remote-control API, which lets anything that can reach it, including the
+  agent itself, skip every human approval check. Other changes: a new `Error`
+  state, password support for password-protected opencode servers, and
+  security hardening of the helper.
+
+### Details
+- See `opencode-podman-status/RELEASE_NOTES.md` (v0.2.0).
+- `gnome-next-meeting` is unchanged and re-released at 0.3.2.
+
 ## v2026.09.25-3 — gnome-next-meeting 0.3.2, opencode-podman-status 0.1.1
 
 ### User-facing changes
