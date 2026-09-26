@@ -1,5 +1,19 @@
 # Release notes — opencode-podman-status
 
+## v0.2.1
+
+- **Fixed: the status plugin could add ~15-20 s to opencode's own startup.**
+  Enabling the plugin sometimes made opencode itself slow to start, with no
+  visible cause. The plugin's startup logged its own "serving on ..." message
+  by calling back into opencode's own HTTP API, and waited for that call to
+  finish before letting opencode continue starting up - but opencode's API is
+  not necessarily reachable yet that early in its own startup, and opencode
+  waits for every plugin to finish before continuing. The plugin no longer
+  waits for that log call (or the two failure ones - invalid port, bind
+  failure) to complete; opencode's startup is no longer able to depend on it
+  either way. No other behaviour changes: same routes, same auth, same
+  tracked state.
+
 ## v0.2.0
 
 - **New: read-only status plugin.** Enable

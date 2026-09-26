@@ -520,6 +520,59 @@ Dev-environment gotcha: **never `pkill` by the name `opencode`** here - the agen
 doing the work is itself an `opencode` process. Kill test instances by verified
 PID only (e.g. one whose netns differs from ours).
 
+## 6b. The startup-delay bug, and why `log()` is fire-and-forget (0.2.1)
+
+Reported symptom: adding the plugin sometimes made opencode's own startup take
+an extra ~15 s, sometimes not, with no obvious cause once things settled.
+
+Root cause, confirmed from a real deployment's own `opencode.log` (not
+reproduced synthetically - the evidence was sitting in
+`~/.local/share/opencode/log/opencode.log`): every real startup after the
+plugin was enabled showed the same shape, six for six:
+
+```
+loading path=.../opencode.jsonc
+                              ← 15-20 s, nothing logged at all →
+"status plugin serving on 127.0.0.1:4097"   ← this plugin's own log line
+"all LSPs are disabled"                      ← opencode's next boot step, 3 ms later
+```
+
+That log line is written by opencode in response to this plugin's own
+`log(client, "info", ...)` call in `start()`, which used to be `await`ed. Two
+facts combine into the bug:
+
+1. `client.app.log()` is a real HTTP POST back into **opencode's own API**,
+   which is not necessarily reachable yet this early in opencode's own
+   startup (`createOpencodeClient`'s generated client does a plain `fetch`
+   with no retry and no default timeout - `req.timeout = false` is set
+   explicitly in `@opencode-ai/sdk`'s `dist/client.js`, so a slow/no-response
+   server just hangs the call rather than failing fast).
+2. opencode's own bootstrap `await`s every plugin's returned promise before
+   moving to its next step. `OpencodePodmanStatus` returns the promise from
+   `start()`, which was awaiting that `log()` call.
+
+So an early, cheap, synchronous plugin step (`Bun.serve()`, which returns
+instantly) ended up gated behind a dependency on opencode's *own* HTTP
+listener already being up - which it was not, this early in boot. The ~15-20 s
+was, empirically, how long opencode's own API took to become reachable in that
+deployment; nothing else was logged in that window, confirming opencode's
+entire startup was blocked on it, not just this plugin's own initialisation.
+
+Fix: every `log()` call in `start()` is fire-and-forget (no `await`). `log()`
+already swallows its own errors internally, so the returned promise never
+rejects and dropping the `await` cannot produce an unhandled rejection. This
+applies to all three call sites - the success path and both error paths
+(invalid port, bind failure): a diagnostic log line must never be able to add
+latency to opencode's own startup, whether it succeeds or fails.
+
+Caught by a new test (`opencode-podman-status.test.js`, "startup never waits on
+opencode's own API") that hands `start()` a `client.app.log` returning a
+promise that never resolves, and asserts the plugin still resolves in well
+under a second. The pre-0.2.1 test suite could not have caught this: every
+existing test calls `OpencodePodmanStatus({})` with no `client`, so
+`client?.app?.log?.()` short-circuits to `undefined` and the old `await` was a
+no-op.
+
 ## 7. Rejected approaches, and why
 
 | Approach | Why not |

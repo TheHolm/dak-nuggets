@@ -41,7 +41,7 @@ import { createHash, timingSafeEqual } from "node:crypto"
 const MARKER = "opencode-podman-status-plugin"
 
 /** Plugin version, reported in /global/health. Kept in step with Cargo.toml. */
-const VERSION = "0.2.0"
+const VERSION = "0.2.1"
 
 /** Port used when OPENCODE_STATUS_PORT is not set. */
 const DEFAULT_PORT = 4097
@@ -323,6 +323,15 @@ function shared() {
 
 /**
  * Writes to opencode's log, never throwing: logging must not break opencode.
+ *
+ * Deliberately fire-and-forget at every call site (never `await`ed): `client`
+ * talks HTTP back to opencode's own API, which is not necessarily reachable
+ * yet this early in opencode's own startup. Measured on a real instance:
+ * opencode's bootstrap awaits every plugin's returned promise before its next
+ * step, so an `await` here once stalled opencode's own startup for 15-20 s -
+ * exactly as long as its API took to come up - with nothing else logged in
+ * between. A diagnostic log line must never be able to do that; the caller
+ * only needs this to never throw, not to have finished.
  * @param {any} client
  * @param {"info" | "warn" | "error"} level
  * @param {string} message
@@ -337,7 +346,8 @@ async function log(client, level, message) {
 
 /**
  * Starts the listener once per process. Any failure is logged and swallowed:
- * a monitoring plugin must never stop opencode from starting.
+ * a monitoring plugin must never stop opencode from starting - including by
+ * making it wait on the logging of that failure (see `log`).
  * @param {any} client
  * @param {Record<string, string | undefined>} env
  */
@@ -347,7 +357,7 @@ async function start(client, env) {
   state.started = true
   const port = parsePort(env.OPENCODE_STATUS_PORT)
   if (port === null) {
-    await log(client, "error", `invalid OPENCODE_STATUS_PORT ${JSON.stringify(env.OPENCODE_STATUS_PORT)}; status plugin not serving`)
+    log(client, "error", `invalid OPENCODE_STATUS_PORT ${JSON.stringify(env.OPENCODE_STATUS_PORT)}; status plugin not serving`)
     return
   }
   try {
@@ -356,9 +366,9 @@ async function start(client, env) {
       port,
       fetch: createHandler(state.tracker, requiredCredentials(env)),
     })
-    await log(client, "info", `status plugin serving on ${HOSTNAME}:${port}`)
+    log(client, "info", `status plugin serving on ${HOSTNAME}:${port}`)
   } catch (e) {
-    await log(client, "error", `status plugin cannot listen on ${HOSTNAME}:${port}: ${e}`)
+    log(client, "error", `status plugin cannot listen on ${HOSTNAME}:${port}: ${e}`)
   }
 }
 
