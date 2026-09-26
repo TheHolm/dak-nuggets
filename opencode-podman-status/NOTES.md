@@ -395,6 +395,17 @@ An earlier 1500 ms default timeout was observed to fail with `EAGAIN` on
 `/session/status` when probing the instant `/global/health` started answering.
 Default is now **2500 ms**. Probes run in parallel, so it bounds the whole run.
 
+**Correction (0.2.0): that `EAGAIN` was most likely not slowness at all.** On a
+cold instance opencode 1.18.32 sends the complete `/session/status` response,
+`Content-Length` included, and then **leaves the socket open** despite our
+`Connection: close`. The old client read to EOF, so it sat there until the read
+timeout fired (`EAGAIN`) - with any timeout. Caught under strace: the 123-byte
+response arrived at +0.1 ms, the next `recvfrom` returned `EAGAIN` 2.4 s later.
+Warm instances do close. The client now stops at `Content-Length` when present
+(`http::expected_total_len`, pinned by
+`stops_at_content_length_when_server_keeps_socket_open`) and only reads to EOF
+without one.
+
 ---
 
 ## 6. Security posture
@@ -418,7 +429,26 @@ required(n) { return isSome(n.password) && n.password.value !== "" }
 `serve`/`web` at least warn *"OPENCODE_SERVER_PASSWORD is not set; server is
 unsecured"*; **the TUI warns about nothing.**
 
-**A password was considered and rejected.** The server reads it only from
+**Password support (0.2.0).** Originally rejected for the reasons in the next
+paragraph, and those still hold; it is supported now because a user asked to run
+opencode with `OPENCODE_SERVER_PASSWORD` set, and the helper then gets 401. The
+helper takes one password for every container, via `--password-file` (warned
+about if group/other-readable, one trailing newline stripped, max 4 KiB) or
+`--password` (visible in `ps` / `/proc/<pid>/cmdline` to every local user on
+every DAK refresh, and stored in DAK's `config.json`), plus `--username`
+(default `opencode`, matching `OPENCODE_SERVER_USERNAME`'s default). Sent as
+`Authorization: Basic` with hand-rolled base64 (RFC 4648 vectors in the tests).
+Only the parent sends requests, so the credentials never enter a container's
+context, and they are redacted from every `Debug` impl. Verified against a real
+1.18.32 `serve --port` with the variable set: no password and a wrong one both
+give "HTTP 401: authentication required or wrong password", the right one works.
+
+Sharing one password across containers adds no exposure: each container's agent
+already holds it (inherited environment, below), and a container's API is
+reachable only from inside its own network namespace, so knowing the password
+lets no container reach another.
+
+**Why the password protects little.** The server reads it only from
 `OPENCODE_SERVER_PASSWORD` — `--password`/`--username` are client-side flags for
 `--attach`, and nothing passes CLI values into `ServerAuth.Config`. Every process
 opencode spawns inherits its environment (`env:{...process.env, ...}` at the shell
@@ -472,10 +502,10 @@ break that.
   remaining time before every read and write. Per-read timeouts alone let a
   server that drips a byte every second hold a probe (and so DAK's invocation)
   for as long as it likes; `slow_drip_server_hits_the_overall_deadline` pins it.
-- **`Connection: close` is why there is no HTTP library.** The server closes the
-  socket when the body is done, so the body is "everything until EOF" — no chunked
-  encoding, no `Content-Length` parsing. Verified against 1.18.32, which replies
-  with `Content-Length` and no chunking. A client crate would have added eight
+- **Why there is still no HTTP library.** Responses end at `Content-Length`
+  (opencode always sends one, and no chunking), or at EOF without one;
+  `Connection: close` is sent but **not reliable** on a cold instance (§5). That
+  is the whole of the framing needed. A client crate would have added eight
   transitive dependencies.
 - **`serde_json` is kept deliberately.** A hand-rolled JSON parser is where a
   silent correctness bug would hide; hand-rolled HTTP is not.

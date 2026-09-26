@@ -3,13 +3,16 @@
 //! Every request this program makes is a plain GET to `127.0.0.1` *inside* a
 //! container's network namespace. That makes almost everything a general HTTP
 //! client handles irrelevant: no TLS, no redirects, no proxies, no keep-alive
-//! pooling.
+//! pooling. The one extra is optional Basic authentication (see
+//! [`crate::auth`]).
 //!
-//! Sending `Connection: close` means the server closes the socket when the body
-//! is complete, so the body is simply "everything until EOF". That removes the
-//! need to implement chunked transfer-encoding or `Content-Length` handling
-//! entirely. Verified against opencode 1.18.32, which honours it and replies
-//! with `Content-Length` and no chunking - see NOTES.md.
+//! Responses end at `Content-Length` when the server sends one, and at EOF
+//! otherwise. `Connection: close` is still sent, and opencode usually honours
+//! it, but **not always**: measured against 1.18.32, the first `/session/status`
+//! on a cold instance arrived complete with `Content-Length` and the socket was
+//! then left open, so "read to EOF" hung until the deadline. opencode replies
+//! with `Content-Length` and no chunking, so chunked transfer-encoding is still
+//! not implemented - see NOTES.md.
 //!
 //! # The peer is not trusted
 //!
@@ -32,6 +35,8 @@ use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, TcpStream};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::time::{Duration, Instant};
+
+use crate::auth::Credentials;
 
 /// Largest single response accepted, headers included.
 ///
@@ -204,13 +209,21 @@ pub struct Client<C: Connect> {
     connector: C,
     deadline: Instant,
     bytes_left: usize,
+    /// Precomputed `Authorization` header value, if credentials were given.
+    authorization: Option<String>,
 }
 
 impl<C: Connect> Client<C> {
     /// A client that must finish every request by `deadline` and may read at
     /// most `byte_budget` bytes in total.
     pub fn new(connector: C, deadline: Instant, byte_budget: usize) -> Self {
-        Client { connector, deadline, bytes_left: byte_budget }
+        Client { connector, deadline, bytes_left: byte_budget, authorization: None }
+    }
+
+    /// Sends these credentials with every request.
+    pub fn with_credentials(mut self, credentials: Option<&Credentials>) -> Self {
+        self.authorization = credentials.map(Credentials::header_value);
+        self
     }
 
     /// Performs `GET path` against `127.0.0.1:port` and returns the response body.
@@ -222,11 +235,16 @@ impl<C: Connect> Client<C> {
         let mut stream = self.connector.connect(port, self.deadline)?;
         stream.set_nodelay(true)?;
 
+        let authorization = match &self.authorization {
+            Some(value) => format!("Authorization: {value}\r\n"),
+            None => String::new(),
+        };
         let request = format!(
             "GET {path} HTTP/1.1\r\n\
              Host: 127.0.0.1:{port}\r\n\
              Accept: application/json\r\n\
              User-Agent: opencode-podman-status\r\n\
+             {authorization}\
              Connection: close\r\n\
              \r\n"
         );
@@ -241,14 +259,20 @@ impl<C: Connect> Client<C> {
     }
 }
 
-/// Reads until EOF, failing at `deadline` or once more than `limit` bytes arrive.
+/// Reads one response: up to its `Content-Length` if it has one, else to EOF.
 ///
-/// The deadline is re-applied before every read, which is what bounds the total
-/// time rather than just the gap between packets.
+/// Fails at `deadline` or once more than `limit` bytes arrive. The deadline is
+/// re-applied before every read, which is what bounds the total time rather than
+/// just the gap between packets.
 fn read_bounded<R: Read + ReadTimeout>(stream: &mut R, deadline: Instant, limit: usize) -> Result<Vec<u8>, Error> {
     let mut raw = Vec::new();
     let mut chunk = [0u8; 16 * 1024];
+    // Total length once the headers have been seen and carried a Content-Length.
+    let mut expected: Option<usize> = None;
     loop {
+        if expected.is_some_and(|total| raw.len() >= total) {
+            return Ok(raw);
+        }
         stream.set_timeout(remaining(deadline)?)?;
         match stream.read(&mut chunk) {
             Ok(0) => return Ok(raw),
@@ -257,11 +281,45 @@ fn read_bounded<R: Read + ReadTimeout>(stream: &mut R, deadline: Instant, limit:
                     return Err(Error(format!("response larger than {limit} bytes")));
                 }
                 raw.extend_from_slice(&chunk[..n]);
+                if expected.is_none() {
+                    expected = expected_total_len(&raw)?;
+                    if expected.is_some_and(|total| total > limit) {
+                        return Err(Error(format!("response larger than {limit} bytes")));
+                    }
+                }
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e.into()),
         }
     }
+}
+
+/// Total response length implied by the headers, once they are complete.
+///
+/// `Ok(None)` means "headers not complete yet, or no Content-Length: read to
+/// EOF". A Content-Length that is not a plain decimal number, or two that
+/// disagree, is an error rather than a guess (RFC 9112 §6.3).
+fn expected_total_len(raw: &[u8]) -> Result<Option<usize>, Error> {
+    let Some(end) = find_header_end(raw) else { return Ok(None) };
+    let body_start = end + header_terminator_len(raw, end);
+    let head = String::from_utf8_lossy(&raw[..end]);
+    let mut length: Option<usize> = None;
+    for line in head.lines().skip(1) {
+        let Some((name, value)) = line.split_once(':') else { continue };
+        if !name.trim().eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        let value = value.trim();
+        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Error(format!("malformed Content-Length: {value:?}")));
+        }
+        let n: usize = value.parse().map_err(|_| Error("Content-Length too large".into()))?;
+        if length.is_some_and(|previous| previous != n) {
+            return Err(Error("conflicting Content-Length headers".into()));
+        }
+        length = Some(n);
+    }
+    Ok(length.map(|n| body_start.saturating_add(n)))
 }
 
 /// A readable stream whose read timeout can be set, so [`read_bounded`] can be
@@ -298,6 +356,14 @@ fn split_response(raw: &[u8]) -> Result<Vec<u8>, Error> {
         .and_then(|c| c.parse::<u16>().ok())
         .ok_or_else(|| Error(format!("malformed status line: {status_line:?}")))?;
 
+    if code == 401 {
+        // The one failure worth spelling out: it has a fix the user can apply.
+        return Err(Error(
+            "HTTP 401: authentication required or wrong password \
+             (see --password-file / --username)"
+                .into(),
+        ));
+    }
     if code != 200 {
         return Err(Error(format!("HTTP {code}")));
     }
@@ -400,12 +466,40 @@ mod tests {
     fn rejects_non_200_status() {
         for (raw, want) in [
             (&b"HTTP/1.1 404 Not Found\r\n\r\n"[..], "HTTP 404"),
-            (&b"HTTP/1.1 401 Unauthorized\r\n\r\n"[..], "HTTP 401"),
             (&b"HTTP/1.1 500 Internal Server Error\r\n\r\n"[..], "HTTP 500"),
         ] {
             let err = split_response(raw).expect_err("should reject");
             assert_eq!(err.to_string(), want);
         }
+    }
+
+    /// A 401 says what to do about it.
+    #[test]
+    fn explains_401() {
+        let err = split_response(b"HTTP/1.1 401 Unauthorized\r\n\r\n").unwrap_err();
+        assert!(err.to_string().starts_with("HTTP 401: authentication required"), "{err}");
+        assert!(err.to_string().contains("--password-file"), "{err}");
+    }
+
+    /// Credentials, when given, go out as a Basic `Authorization` header; when
+    /// not, no such header is sent at all.
+    #[test]
+    fn sends_basic_auth_only_when_configured() {
+        let creds = Credentials::new("opencode", "open sesame").unwrap();
+        let (port, server) = serve_once(|sock| sock.write_all(REAL_HEALTH_RESPONSE).unwrap());
+        client(Duration::from_secs(5))
+            .with_credentials(Some(&creds))
+            .get(port, "/global/health")
+            .expect("request");
+        let head = server.join().unwrap();
+        assert!(
+            head.contains(&format!("Authorization: Basic {}\r\n", crate::auth::base64(b"opencode:open sesame"))),
+            "head: {head:?}"
+        );
+
+        let (port, server) = serve_once(|sock| sock.write_all(REAL_HEALTH_RESPONSE).unwrap());
+        client(Duration::from_secs(5)).with_credentials(None).get(port, "/global/health").unwrap();
+        assert!(!server.join().unwrap().contains("Authorization"));
     }
 
     /// Garbage that is not an HTTP response at all is rejected, not guessed at.
@@ -483,6 +577,62 @@ mod tests {
         assert!(head.starts_with("GET /global/health HTTP/1.1\r\n"), "head: {head:?}");
         assert!(head.contains("Connection: close\r\n"), "head: {head:?}");
         assert!(head.contains(&format!("Host: 127.0.0.1:{port}\r\n")), "head: {head:?}");
+    }
+
+    /// A complete response with Content-Length is returned even though the
+    /// server keeps the connection open - the behaviour measured on a cold
+    /// opencode 1.18.32, which made "read to EOF" hang until the deadline.
+    #[test]
+    fn stops_at_content_length_when_server_keeps_socket_open() {
+        let (port, server) = serve_once(|sock| {
+            sock.write_all(REAL_HEALTH_RESPONSE).unwrap();
+            // Hold the socket open well past the client's deadline.
+            thread::sleep(Duration::from_millis(1500));
+        });
+        let started = Instant::now();
+        let body = client(Duration::from_secs(1)).get(port, "/global/health").expect("no hang");
+        assert!(started.elapsed() < Duration::from_millis(900), "took {:?}", started.elapsed());
+        assert_eq!(body, br#"{"healthy":true,"version":"1.18.32"}"#.to_vec());
+        server.join().unwrap();
+    }
+
+    /// Content-Length is found case-insensitively and only once headers end.
+    #[test]
+    fn computes_expected_length_from_headers() {
+        assert_eq!(expected_total_len(b"HTTP/1.1 200 OK\r\nContent-Len").unwrap(), None);
+        assert_eq!(expected_total_len(b"HTTP/1.1 200 OK\r\n\r\n").unwrap(), None);
+        assert_eq!(
+            expected_total_len(b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nab").unwrap(),
+            Some(43)
+        );
+        assert_eq!(expected_total_len(REAL_HEALTH_RESPONSE).unwrap(), Some(REAL_HEALTH_RESPONSE.len()));
+    }
+
+    /// Malformed or conflicting lengths are refused rather than guessed at.
+    #[test]
+    fn refuses_malformed_content_length() {
+        for raw in [
+            &b"HTTP/1.1 200 OK\r\nContent-Length: -1\r\n\r\n"[..],
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1e3\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nContent-Length:\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 99999999999999999999999\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n",
+        ] {
+            assert!(expected_total_len(raw).is_err(), "{:?}", String::from_utf8_lossy(raw));
+        }
+    }
+
+    /// A declared length over the cap fails at once, before the body is read.
+    #[test]
+    fn refuses_oversized_declared_length_early() {
+        let (port, _server) = serve_once(|sock| {
+            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\n\r\n");
+            thread::sleep(Duration::from_millis(1500));
+        });
+        let started = Instant::now();
+        let err = client(Duration::from_secs(1)).get(port, "/big").expect_err("too big");
+        assert!(err.to_string().contains("larger than"), "{err}");
+        assert!(started.elapsed() < Duration::from_millis(900));
     }
 
     /// A server that trickles bytes forever is cut off at the deadline, even

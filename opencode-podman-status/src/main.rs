@@ -2,6 +2,7 @@
 //!
 //! See README.markdown for usage and NOTES.md for why it works the way it does.
 
+mod auth;
 mod discover;
 mod http;
 mod ident;
@@ -69,6 +70,25 @@ enum Mode {
     Version,
 }
 
+/// Where the server password comes from.
+#[derive(Clone, PartialEq, Eq)]
+enum PasswordSource {
+    /// Given directly with `--password` (visible in `ps`).
+    Argument(String),
+    /// Read from the file named with `--password-file`.
+    File(String),
+}
+
+impl std::fmt::Debug for PasswordSource {
+    /// Never shows a command-line password; a file path is harmless to show.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PasswordSource::Argument(_) => f.write_str("Argument(<redacted>)"),
+            PasswordSource::File(path) => f.debug_tuple("File").field(path).finish(),
+        }
+    }
+}
+
 /// Parsed command line.
 #[derive(Debug)]
 struct Options {
@@ -76,11 +96,24 @@ struct Options {
     /// Skip port discovery and use this port.
     port: Option<u16>,
     timeout: Duration,
+    /// Password for opencode's server, if it was started with one.
+    password: Option<PasswordSource>,
+    /// Username to go with the password; `opencode` if not given.
+    username: Option<String>,
+    /// The resolved credentials, filled in by [`resolve_credentials`].
+    credentials: Option<auth::Credentials>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { mode: Mode::Counts, port: None, timeout: DEFAULT_TIMEOUT }
+        Options {
+            mode: Mode::Counts,
+            port: None,
+            timeout: DEFAULT_TIMEOUT,
+            password: None,
+            username: None,
+            credentials: None,
+        }
     }
 }
 
@@ -104,6 +137,12 @@ Options:
   --port <n>              Use this port instead of discovering it.
   --timeout <ms>          Time budget per container, all requests included
                           (default 2500).
+  --password-file <path>  Password for opencode servers started with
+                          OPENCODE_SERVER_PASSWORD; one for all containers.
+                          The file should be mode 600.
+  --password <pw>         The same, given directly. Visible to every local
+                          user via ps(1) - prefer --password-file.
+  --username <name>       Username for the above (default opencode).
   -h, --help              This text.
   -V, --version           Version.
 
@@ -151,13 +190,50 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 let ms: u64 = v.parse().map_err(|_| format!("invalid timeout: {v}"))?;
                 options.timeout = Duration::from_millis(ms);
             }
+            "--password" => {
+                let v = value(args, &mut index, "--password")?;
+                set_password(&mut options, PasswordSource::Argument(v.to_string()))?;
+            }
+            "--password-file" => {
+                let v = value(args, &mut index, "--password-file")?;
+                set_password(&mut options, PasswordSource::File(v.to_string()))?;
+            }
+            "--username" => {
+                options.username = Some(value(args, &mut index, "--username")?.to_string());
+            }
             "-h" | "--help" => options.mode = Mode::Help,
             "-V" | "--version" => options.mode = Mode::Version,
             other => return Err(format!("unknown argument: {other}")),
         }
         index += 1;
     }
+    if options.username.is_some() && options.password.is_none() {
+        return Err("--username needs --password or --password-file".to_string());
+    }
     Ok(options)
+}
+
+/// Records the password source, refusing a second one.
+fn set_password(options: &mut Options, source: PasswordSource) -> Result<(), String> {
+    if options.password.is_some() {
+        return Err("give only one of --password and --password-file, once".to_string());
+    }
+    options.password = Some(source);
+    Ok(())
+}
+
+/// Turns the password options into credentials, reading the file if one was named.
+///
+/// Returns any warning (a password file others can read) for the caller to show.
+fn resolve_credentials(options: &mut Options) -> Result<Option<String>, String> {
+    let (password, warning) = match &options.password {
+        None => return Ok(None),
+        Some(PasswordSource::Argument(pw)) => (pw.clone(), None),
+        Some(PasswordSource::File(path)) => auth::read_password_file(path)?,
+    };
+    let username = options.username.as_deref().unwrap_or(auth::DEFAULT_USERNAME);
+    options.credentials = Some(auth::Credentials::new(username, &password)?);
+    Ok(warning)
 }
 
 /// Current time in Unix milliseconds.
@@ -211,7 +287,8 @@ fn probe_container(container: &Container, options: &Options) -> Report {
         Err(e) => return Report::failed(format!("cannot enter namespaces of pid {pid}: {e}")),
     };
 
-    let mut client = http::Client::new(http::Pool(sockets), deadline, BYTE_BUDGET);
+    let mut client = http::Client::new(http::Pool(sockets), deadline, BYTE_BUDGET)
+        .with_credentials(options.credentials.as_ref());
     probe::run(&mut client, &ports, now_ms())
 }
 
@@ -340,7 +417,7 @@ fn run(options: Options) -> Result<String, String> {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    let options = match parse_args(&args) {
+    let mut options = match parse_args(&args) {
         Ok(options) => options,
         Err(e) => {
             eprintln!("{PROGRAM}: {e}");
@@ -348,6 +425,15 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    match resolve_credentials(&mut options) {
+        Ok(Some(warning)) => eprintln!("{PROGRAM}: {warning}"),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("{PROGRAM}: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
 
     match run(options) {
         Ok(output) => {
@@ -439,6 +525,56 @@ mod tests {
         assert!(parse_args(&args(&["--port"])).is_err());
         assert!(parse_args(&args(&["--instance"])).is_err());
         assert!(parse_args(&args(&["--nonsense"])).is_err());
+    }
+
+    /// Either password option is accepted, with an optional username.
+    #[test]
+    fn parses_password_options() {
+        let o = parse_args(&args(&["--password", "pw"])).unwrap();
+        assert_eq!(o.password, Some(PasswordSource::Argument("pw".into())));
+        let o = parse_args(&args(&["--password-file", "/p", "--username", "me"])).unwrap();
+        assert_eq!(o.password, Some(PasswordSource::File("/p".into())));
+        assert_eq!(o.username.as_deref(), Some("me"));
+    }
+
+    /// Conflicting or incomplete password options are refused.
+    #[test]
+    fn rejects_bad_password_options() {
+        assert!(parse_args(&args(&["--password", "a", "--password-file", "/p"])).is_err());
+        assert!(parse_args(&args(&["--password", "a", "--password", "b"])).is_err());
+        assert!(parse_args(&args(&["--username", "me"])).is_err());
+        assert!(parse_args(&args(&["--password"])).is_err());
+        assert!(parse_args(&args(&["--password-file"])).is_err());
+    }
+
+    /// A command-line password never shows up in debug output of the options.
+    #[test]
+    fn options_debug_redacts_password() {
+        let mut o = parse_args(&args(&["--password", "hunter2"])).unwrap();
+        resolve_credentials(&mut o).unwrap();
+        let shown = format!("{o:?}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+    }
+
+    /// Credentials resolve with the default username, or the one given.
+    #[test]
+    fn resolves_credentials() {
+        let mut o = parse_args(&args(&["--password", "pw"])).unwrap();
+        assert_eq!(resolve_credentials(&mut o), Ok(None));
+        assert_eq!(o.credentials, Some(auth::Credentials::new("opencode", "pw").unwrap()));
+
+        let mut o = parse_args(&args(&["--password", "pw", "--username", "me"])).unwrap();
+        resolve_credentials(&mut o).unwrap();
+        assert_eq!(o.credentials, Some(auth::Credentials::new("me", "pw").unwrap()));
+
+        let mut o = parse_args(&args(&[])).unwrap();
+        assert_eq!(resolve_credentials(&mut o), Ok(None));
+        assert_eq!(o.credentials, None);
+
+        let mut o = parse_args(&args(&["--password", ""])).unwrap();
+        assert!(resolve_credentials(&mut o).is_err());
+        let mut o = parse_args(&args(&["--password-file", "/nonexistent/pw"])).unwrap();
+        assert!(resolve_credentials(&mut o).is_err());
     }
 
     /// Builds a container/report pair for selection tests.
