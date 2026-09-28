@@ -25,6 +25,8 @@ doing, as three six-character lines sized for a DAK button LCD: how many
 instances are working, how many are waiting for you (a question, a permission
 prompt or a failed turn), and how many are idle. With --instance it reports one
 container's name, state and how long it has been in that state instead.
+--fmt/--details-fmt optionally wrap either view's lines in DAK's tmux-style
+colour tags, e.g. to turn a button red only while something is waiting.
 
 The package includes a read-only opencode status plugin, installed under
 /usr/share/opencode-podman-status/. Once it is enabled in opencode.json,
@@ -46,4 +48,4 @@ Intended for DAK's text_exec setup type, but usable from any script."
 # The major.minor this text was last checked against. Patch digits are
 # deliberately ignored: a patch release changes no behaviour by definition, so
 # it cannot invalidate the description.
-PKG_METADATA_REVIEWED_FOR="0.2"
+PKG_METADATA_REVIEWED_FOR="0.3"

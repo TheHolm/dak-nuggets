@@ -123,6 +123,10 @@ struct Options {
     username: Option<String>,
     /// The resolved credentials, filled in by [`resolve_credentials`].
     credentials: Option<auth::Credentials>,
+    /// DAK-tag overrides for the aggregate summary button (`--fmt`).
+    fmt: render::SummaryFormats,
+    /// DAK-tag overrides for the `--instance` detail button (`--details-fmt`).
+    details_fmt: render::DetailFormats,
 }
 
 impl Default for Options {
@@ -136,6 +140,8 @@ impl Default for Options {
             password: None,
             username: None,
             credentials: None,
+            fmt: render::SummaryFormats::default(),
+            details_fmt: render::DetailFormats::default(),
         }
     }
 }
@@ -175,6 +181,24 @@ Options:
   --password <pw>         The same, given directly. Visible to every local
                           user via ps(1) - prefer --password-file.
   --username <name>       Username for the above (default opencode).
+  --fmt <KEYS>=<TAGS>     Wrap the aggregate summary's run/wait/done lines in
+                          DAK tmux-style tags (needs DAK >= 0.13 with markup
+                          left at its default \"tmux\"). KEYS is one or more
+                          of run0,run1,wait0,wait1,done0,done1,unknown
+                          (comma-separated), each meaning that line when its
+                          count is zero (0) or non-zero (1), or the summary
+                          shown while podman itself did not answer in time
+                          (unknown, falling back to that line's own zero
+                          format, then to #[default]). Repeatable; a later
+                          --fmt for the same key wins. With no --fmt, output
+                          is unchanged. Example:
+                            --fmt wait0='#[fg=gray]' --fmt wait1='#[fg=red,bold]'
+  --details-fmt <KEYS>=<TAGS>
+                          Like --fmt, but for the --instance detail button's
+                          state line. KEYS is one or more of run,wait,done,
+                          error,unknown. With no --details-fmt, output is
+                          unchanged; otherwise the name and time lines always
+                          use #[default] and only the state line is styled.
   -h, --help              This text.
   -V, --version           Version.
 
@@ -247,6 +271,14 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             "--username" => {
                 options.username = Some(value(args, &mut index, "--username")?.to_string());
             }
+            "--fmt" => {
+                let v = value(args, &mut index, "--fmt")?.to_string();
+                apply_summary_fmt(&v, &mut options.fmt)?;
+            }
+            "--details-fmt" => {
+                let v = value(args, &mut index, "--details-fmt")?.to_string();
+                apply_detail_fmt(&v, &mut options.details_fmt)?;
+            }
             "-h" | "--help" => options.mode = Mode::Help,
             "-V" | "--version" => options.mode = Mode::Version,
             other => return Err(format!("unknown argument: {other}")),
@@ -265,6 +297,65 @@ fn set_password(options: &mut Options, source: PasswordSource) -> Result<(), Str
         return Err("give only one of --password and --password-file, once".to_string());
     }
     options.password = Some(source);
+    Ok(())
+}
+
+/// Splits a `--fmt`/`--details-fmt` argument (`KEYS=TAGS`) into its
+/// comma-separated keys and a value checked to be made only of DAK `#[...]`
+/// tags. `flag` is the option's own name, for the error message.
+fn split_fmt_spec<'a>(spec: &'a str, flag: &str) -> Result<(Vec<&'a str>, &'a str), String> {
+    let (keys, value) = spec
+        .split_once('=')
+        .ok_or_else(|| format!("{flag}: expected KEYS=TAGS, got '{spec}'"))?;
+    if keys.is_empty() {
+        return Err(format!("{flag}: expected KEYS=TAGS, got '{spec}'"));
+    }
+    if !render::is_valid_format_value(value) {
+        return Err(format!(
+            "{flag}: value must be made only of #[...] tags: '{value}'"
+        ));
+    }
+    Ok((keys.split(',').collect(), value))
+}
+
+/// Applies one `--fmt KEYS=TAGS` argument to the aggregate summary's formats.
+///
+/// KEYS is one or more of `run0,run1,wait0,wait1,done0,done1,unknown`. Setting
+/// the same key again (in a later `--fmt`) overwrites the earlier value.
+fn apply_summary_fmt(spec: &str, formats: &mut render::SummaryFormats) -> Result<(), String> {
+    let (keys, value) = split_fmt_spec(spec, "--fmt")?;
+    for key in keys {
+        match key {
+            "run0" => formats.run0 = Some(value.to_string()),
+            "run1" => formats.run1 = Some(value.to_string()),
+            "wait0" => formats.wait0 = Some(value.to_string()),
+            "wait1" => formats.wait1 = Some(value.to_string()),
+            "done0" => formats.done0 = Some(value.to_string()),
+            "done1" => formats.done1 = Some(value.to_string()),
+            "unknown" => formats.unknown = Some(value.to_string()),
+            other => return Err(format!("--fmt: unknown key '{other}'")),
+        }
+    }
+    Ok(())
+}
+
+/// Applies one `--details-fmt KEYS=TAGS` argument to the detail button's
+/// state-line formats.
+///
+/// KEYS is one or more of `run,wait,done,error,unknown`. Setting the same key
+/// again (in a later `--details-fmt`) overwrites the earlier value.
+fn apply_detail_fmt(spec: &str, formats: &mut render::DetailFormats) -> Result<(), String> {
+    let (keys, value) = split_fmt_spec(spec, "--details-fmt")?;
+    for key in keys {
+        match key {
+            "run" => formats.run = Some(value.to_string()),
+            "wait" => formats.wait = Some(value.to_string()),
+            "done" => formats.done = Some(value.to_string()),
+            "error" => formats.error = Some(value.to_string()),
+            "unknown" => formats.unknown = Some(value.to_string()),
+            other => return Err(format!("--details-fmt: unknown key '{other}'")),
+        }
+    }
     Ok(())
 }
 
@@ -536,26 +627,30 @@ fn run_with(options: Options, podman: &[&str]) -> Result<Printed, String> {
         Mode::Counts => {
             let containers = match discover() {
                 Ok(containers) => containers,
-                Err(e) => return or_placeholder(e, render::counts_unknown()),
+                Err(e) => return or_placeholder(e, render::counts_unknown(&options.fmt)),
             };
             let results = probe_all(&containers, &options, run_deadline);
             let counts = Counts::tally(results.iter().map(|(_, r)| r.parsed_state()));
-            Ok(Printed::plain(render::counts(counts)))
+            Ok(Printed::plain(render::counts(counts, &options.fmt)))
         }
 
         Mode::Instance(wanted) => {
             let containers = match discover() {
                 Ok(containers) => containers,
-                Err(e) => return or_placeholder(e, render::instance_unknown()),
+                Err(e) => return or_placeholder(e, render::instance_unknown(&options.details_fmt)),
             };
             let results = probe_all(&containers, &options, run_deadline);
             let stdout = match select_instance(&results, wanted) {
                 // A slot that does not exist prints nothing at all, so an unused
                 // DAK button stays blank.
                 None => String::new(),
-                Some((container, report)) => {
-                    render::instance(&container.name, report.parsed_state(), report.since_ms, now)
-                }
+                Some((container, report)) => render::instance(
+                    &container.name,
+                    report.parsed_state(),
+                    report.since_ms,
+                    now,
+                    &options.details_fmt,
+                ),
             };
             Ok(Printed::plain(stdout))
         }
@@ -925,6 +1020,82 @@ mod tests {
         assert!(out.contains("via=plugin"), "{out}");
     }
 
+    /// `--fmt` sets one or more summary keys from a single `KEYS=TAGS`
+    /// argument, and a later `--fmt` for the same key overwrites the earlier
+    /// value.
+    #[test]
+    fn parses_fmt_options() {
+        let o = parse_args(&args(&["--fmt", "wait0=#[fg=gray]"])).unwrap();
+        assert_eq!(o.fmt.wait0.as_deref(), Some("#[fg=gray]"));
+        assert_eq!(o.fmt.wait1, None);
+
+        // A shared key list sets every named field.
+        let o = parse_args(&args(&["--fmt", "run0,wait0,done0=#[fg=gray]"])).unwrap();
+        assert_eq!(o.fmt.run0.as_deref(), Some("#[fg=gray]"));
+        assert_eq!(o.fmt.wait0.as_deref(), Some("#[fg=gray]"));
+        assert_eq!(o.fmt.done0.as_deref(), Some("#[fg=gray]"));
+
+        // A later --fmt for the same key wins.
+        let o = parse_args(&args(&[
+            "--fmt",
+            "wait0=#[fg=gray]",
+            "--fmt",
+            "wait0=#[fg=blue]",
+        ]))
+        .unwrap();
+        assert_eq!(o.fmt.wait0.as_deref(), Some("#[fg=blue]"));
+
+        let o = parse_args(&args(&["--fmt", "unknown=#[fg=yellow]"])).unwrap();
+        assert_eq!(o.fmt.unknown.as_deref(), Some("#[fg=yellow]"));
+    }
+
+    /// Bad `--fmt` values are rejected: no `=`, an unknown key, or a value that
+    /// is not made only of `#[...]` tags.
+    #[test]
+    fn rejects_bad_fmt_options() {
+        assert!(parse_args(&args(&["--fmt", "wait0"])).is_err());
+        assert!(parse_args(&args(&["--fmt", "nope=#[fg=red]"])).is_err());
+        assert!(parse_args(&args(&["--fmt", "wait0=plain text"])).is_err());
+        assert!(parse_args(&args(&["--fmt", "wait0=#[fg=red"])).is_err());
+        assert!(parse_args(&args(&["--fmt"])).is_err());
+        // A --details-fmt key is not valid for --fmt, and vice versa.
+        assert!(parse_args(&args(&["--fmt", "wait=#[fg=red]"])).is_err());
+    }
+
+    /// `--details-fmt` sets one or more detail keys the same way `--fmt` does.
+    #[test]
+    fn parses_details_fmt_options() {
+        let o = parse_args(&args(&["--details-fmt", "wait=#[fg=red,bold]"])).unwrap();
+        assert_eq!(o.details_fmt.wait.as_deref(), Some("#[fg=red,bold]"));
+        assert_eq!(o.details_fmt.run, None);
+
+        let o = parse_args(&args(&["--details-fmt", "wait,error=#[fg=red]"])).unwrap();
+        assert_eq!(o.details_fmt.wait.as_deref(), Some("#[fg=red]"));
+        assert_eq!(o.details_fmt.error.as_deref(), Some("#[fg=red]"));
+
+        let o = parse_args(&args(&[
+            "--details-fmt",
+            "run,wait,done=#[fg=green]",
+            "--details-fmt",
+            "wait=#[fg=red,bold]",
+        ]))
+        .unwrap();
+        assert_eq!(o.details_fmt.run.as_deref(), Some("#[fg=green]"));
+        assert_eq!(o.details_fmt.done.as_deref(), Some("#[fg=green]"));
+        assert_eq!(o.details_fmt.wait.as_deref(), Some("#[fg=red,bold]"));
+    }
+
+    /// Bad `--details-fmt` values are rejected the same way `--fmt` is.
+    #[test]
+    fn rejects_bad_details_fmt_options() {
+        assert!(parse_args(&args(&["--details-fmt", "wait"])).is_err());
+        assert!(parse_args(&args(&["--details-fmt", "nope=#[fg=red]"])).is_err());
+        assert!(parse_args(&args(&["--details-fmt", "wait=plain text"])).is_err());
+        assert!(parse_args(&args(&["--details-fmt"])).is_err());
+        // A --fmt key is not valid for --details-fmt.
+        assert!(parse_args(&args(&["--details-fmt", "wait0=#[fg=red]"])).is_err());
+    }
+
     /// A probe gets its full `--timeout` when the run has time for it, and is
     /// cut short at the end of the run otherwise.
     #[test]
@@ -1154,5 +1325,53 @@ mod tests {
         assert_eq!(out, Printed::plain("run: 0\nwait:0\ndone:0\n".to_string()));
         let out = run_with(mode(Mode::Instance("1".into())), &fake.cmd()).unwrap();
         assert_eq!(out, Printed::plain(String::new()));
+    }
+
+    /// End to end: `--fmt` styles the summary's zero-count lines, and, with
+    /// podman stuck, the same formats cover the placeholder dashes too.
+    #[test]
+    fn fmt_styles_the_summary_end_to_end() {
+        let mut options = mode(Mode::Counts);
+        apply_summary_fmt("run0,wait0,done0=#[fg=gray]", &mut options.fmt).unwrap();
+        apply_summary_fmt("wait1=#[fg=red,bold]", &mut options.fmt).unwrap();
+
+        let fake = FakePodman::new("echo '[]'");
+        let out = run_with(options, &fake.cmd()).unwrap();
+        assert_eq!(
+            out.stdout,
+            "#[fg=gray]run: 0\n#[fg=gray]wait:0\n#[fg=gray]done:0\n"
+        );
+
+        let mut options = mode(Mode::Counts);
+        apply_summary_fmt("wait0=#[fg=gray]", &mut options.fmt).unwrap();
+        let fake = FakePodman::new("sleep 30");
+        let out = run_with(options, &fake.cmd()).unwrap();
+        // No explicit `unknown`, so the busy placeholder falls back to each
+        // line's own zero format, then to #[default].
+        assert_eq!(
+            out.stdout,
+            "#[default]run: -\n#[fg=gray]wait:-\n#[default]done:-\n"
+        );
+    }
+
+    /// End to end: `--details-fmt` styles only the `--instance` state line,
+    /// leaving the name and time lines at `#[default]`.
+    #[test]
+    fn details_fmt_styles_the_instance_state_line_end_to_end() {
+        let mut options = mode(Mode::Instance("1".into()));
+        apply_detail_fmt("wait,error=#[fg=red,bold]", &mut options.details_fmt).unwrap();
+
+        let fake = FakePodman::new(
+            "echo '[{\"Id\":\"abc\",\"Names\":[\"opencode-web\"],\"Created\":1,\"Pid\":1}]'",
+        );
+        let out = run_with(options, &fake.cmd()).unwrap();
+        // No status server is actually reachable at pid 1 in this test
+        // environment, so the container is unreachable ("----"); what matters
+        // here is that the name/time lines stay #[default] once any
+        // --details-fmt is set.
+        let lines: Vec<&str> = out.stdout.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("#[default]"), "{lines:?}");
+        assert!(lines[2].starts_with("#[default]"), "{lines:?}");
     }
 }
