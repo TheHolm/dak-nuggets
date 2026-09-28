@@ -20,6 +20,22 @@ parses this structure to build each GitHub Release's body, printing from a
 No releases yet - this file gains its first `## vYYYY.MM.DD` entry when the
 first collection-wide tag is cut.
 
+## v2026.09.28 — opencode-podman-status 0.3.0
+
+### User-facing changes
+- New: `opencode-podman-status` can colour its DAK buttons. `--fmt
+  KEYS=TAGS` styles the aggregate summary's lines by whether each count is
+  zero (`run0`/`wait0`/`done0`) or not (`run1`/`wait1`/`done1`), plus
+  `unknown` for the dashes shown while podman itself did not answer in
+  time. `--details-fmt KEYS=TAGS` styles only the `--instance` state line
+  (`run`/`wait`/`done`/`error`/`unknown`). Both need DAK >= 0.13 with
+  markup left at its default `"tmux"`. Without either option, output is
+  unchanged.
+
+### Details
+- See `opencode-podman-status/RELEASE_NOTES.md` (v0.3.0) and `NOTES.md`
+  (§6d).
+
 ## v2026.09.26-3 — opencode-podman-status 0.2.2
 
 ### User-facing changes

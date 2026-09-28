@@ -1,5 +1,30 @@
 # Release notes — opencode-podman-status
 
+## v0.3.0
+
+- **New: colour buttons with DAK's tmux-style tags.** DAK (>= 0.13, `markup`
+  left at its default `"tmux"`) understands tags like `#[fg=red,bold]` in
+  button text. Two new options wrap this program's own lines in such tags:
+  - `--fmt KEYS=TAGS` colours the aggregate summary. Keys are `run0`/`wait0`/
+    `done0` (that line at a zero count), `run1`/`wait1`/`done1` (non-zero, 1-9)
+    and `unknown` (the three dashed lines shown while podman itself did not
+    answer in time - see the busy-podman behaviour below - falling back to
+    that line's own zero format, then to plain `#[default]`, when `unknown`
+    is not set).
+  - `--details-fmt KEYS=TAGS` colours only the state line of an `--instance`
+    button: keys `run`/`wait`/`done`/`error`/`unknown` (the last for `----`).
+    The name and time lines stay plain (`#[default]`) once any
+    `--details-fmt` key is set, so only the word that changes gets coloured.
+  - Both options are repeatable, take a comma-separated key list before the
+    `=`, and a later use of the same key overrides an earlier one. `TAGS` must
+    be made only of `#[...]` tags - no bare text, no newlines - which is
+    rejected at startup otherwise (a bad command line, same as any other).
+  - With neither option given, output is byte-for-byte the old plain text;
+    with one given, every line it covers gets a leading tag (a configured
+    one, or `#[default]`), so a colour from one refresh can never leak into
+    the next line or the next run.
+  - See [Colouring buttons](README.markdown#colouring-buttons).
+
 ## v0.2.2
 
 - **Fixed: buttons showed "Error" while a container was being terminated.**

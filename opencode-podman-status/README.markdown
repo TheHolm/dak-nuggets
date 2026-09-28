@@ -173,6 +173,10 @@ opencode-podman-status [options]
   --password <pw>         The same, given directly. Visible to every local
                           user via ps(1) - prefer --password-file.
   --username <name>       Username for the above (default opencode).
+  --fmt <KEYS>=<TAGS>     Colour the aggregate summary; see Colouring buttons.
+  --details-fmt <KEYS>=<TAGS>
+                          Colour the --instance state line; see Colouring
+                          buttons.
   -h, --help              Usage.
   -V, --version           Version.
 ```
@@ -215,6 +219,51 @@ $ opencode-podman-status --list
  4  opencode-tmp             unknown  --:--  pid=42011    port=-      via=-       opencode is not running in this container
 ```
 
+### Colouring buttons
+
+DAK (>= 0.13, with `markup` left at its default `"tmux"`) understands
+tmux-style tags such as `#[fg=red,bold]` in button text. `--fmt` and
+`--details-fmt` wrap this program's own lines in tags of your choosing, so a
+button can go red when something needs you and grey when it doesn't. With
+neither option given, output is exactly the plain text shown under
+[Output](#output) - nothing changes unless you ask for it.
+
+Both options take one argument shaped `KEYS=TAGS`: `KEYS` is one or more
+comma-separated keys, and `TAGS` is one or more DAK `#[...]` tags applied to
+every named key. Give the option again to set more keys; setting the same key
+twice keeps the later value. `TAGS` must be made only of `#[...]` tags - no
+plain text, no newlines - since that is what keeps every line inside DAK's
+three-line, six-character button.
+
+**`--fmt`** colours the aggregate summary. Its keys are `run0`, `wait0`,
+`done0` (that line when its count is zero) and `run1`, `wait1`, `done1` (that
+line when its count is 1-9), plus `unknown` for the three dashed lines shown
+while podman itself did not answer in time (see
+[When podman is busy](#when-podman-is-busy)); a line with no `unknown` format
+falls back to its own zero format, then to plain `#[default]`.
+
+```
+opencode-podman-status --fmt run0,wait0,done0='#[fg=gray]' --fmt wait1='#[fg=red,bold]'
+```
+
+Grey `run:`/`wait:`/`done:` at zero, bold red `wait:` as soon as something is
+waiting on you.
+
+**`--details-fmt`** colours only the state line of the `--instance` button
+(`run`, `wait`, `done`, `Error`, or `----` for a container that could not be
+probed). The name and time lines are always plain (`#[default]`) once any
+`--details-fmt` key is set.
+
+```
+opencode-podman-status --instance 1 --details-fmt wait,error='#[fg=red,bold]' --details-fmt run='#[fg=yellow]'
+```
+
+Once any key of an option is set, every line that option covers gets a tag -
+one you configured, or `#[default]` for a line you left out - so no colour
+from a previous refresh's line can leak into the next one. The two options are
+independent and each is ignored by the mode it doesn't apply to, so the same
+`params` string works whether it names a summary or a detail button.
+
 ## DAK integration
 
 Show the aggregate on one button:
@@ -233,6 +282,16 @@ Or give each container its own button:
 {
   "type": "text_exec",
   "params": "opencode-podman-status --instance 1",
+  "refresh": 5
+}
+```
+
+With colour, see [Colouring buttons](#colouring-buttons):
+
+```json
+{
+  "type": "text_exec",
+  "params": "opencode-podman-status --fmt run0,wait0,done0='#[fg=gray]' --fmt wait1='#[fg=red,bold]'",
   "refresh": 5
 }
 ```

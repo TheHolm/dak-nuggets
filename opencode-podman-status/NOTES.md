@@ -573,6 +573,69 @@ existing test calls `OpencodePodmanStatus({})` with no `client`, so
 `client?.app?.log?.()` short-circuits to `undefined` and the old `await` was a
 no-op.
 
+## 6d. Colouring buttons with DAK's tmux-style tags (0.3.0)
+
+DAK >= 0.13.0 draws button text through a small tmux-style markup parser
+(`#[fg=red,bold]` etc; `markup` defaults to `"tmux"`, and can be set to
+`"none"` per button or in `defaults`). `--fmt` and `--details-fmt` let a
+`text_exec` command wrap its own output in these tags without DAK-side
+configuration, since a button's `text_exec` output is exactly this program's
+stdout with no chance to post-process it in `config.json`.
+
+**Design constraints that shaped the option shape**, worked out with the user
+across a few iterations:
+
+- **Plain by default.** With neither `--fmt` nor `--details-fmt` given, output
+  must be byte-identical to pre-0.3.0 output - important for anyone already
+  relying on exact string matching or golden-file tests of this program's
+  stdout, and for configs that deliberately keep `markup: "none"`.
+- **A style must not leak into the next line.** DAK's own docs say a style
+  "carries over to the following lines until changed". Rather than emit a
+  reset tag after a styled line, every line gets its *own* explicit tag once
+  formatting is in effect at all (a configured one, or `#[default]`), so
+  order of lines never matters and nothing can leak from a previous run
+  either (each invocation's stdout is independent).
+- **Few flags.** Earlier iterations proposed a flag per state
+  (`--fmt-wait-nonzero`, `--fmt-state-error`, ...), which the user rejected as
+  too many options to remember. The final shape is exactly two flags, each
+  taking a repeatable `KEYS=TAGS` argument, so one `--fmt` call can set a
+  group of keys to a shared tag (`run0,wait0,done0=#[fg=gray]`) and a later
+  `--fmt` can override one member of that group without disturbing the rest
+  (last write per key wins - see `apply_summary_fmt`/`apply_detail_fmt` in
+  `main.rs`).
+- **`0`/`1` suffix, not a separate word.** An earlier iteration used bare
+  `wait`/`wait0` for zero/non-zero, which read as ambiguous next to the
+  `--details-fmt` keys (`run`/`wait`/`done`, with no zero/non-zero
+  distinction - the *count* is what varies on the summary, but the detail
+  view has no count, just the current state). The user picked `wait0`/`wait1`
+  explicitly to make "zero" vs. "the summary counts as 1 either way" visible
+  in the key name, `1` meaning "non-zero" (i.e. clamped 1-9), not literally
+  the count 1.
+- **`unknown` only on the summary/detail options that need it**, not a third
+  option: it covers the placeholder shown while podman itself did not answer
+  in time (§6c) - the three summary dashes, or `----`/`????` on the detail
+  view. Falling back to a line's own zero format when `unknown` is unset
+  (rather than always `#[default]`) was the user's explicit call: dashes
+  read more like "definitely idle" than like an unstyled default.
+
+**Validation** (`render::is_valid_format_value`): a value must be made only of
+`#[...]` groups - no bare text outside a tag, no control characters anywhere
+(including newlines), every `#[` closed by a `]` in the same value. This is
+what keeps every rendered line inside DAK's three-line, six-character button
+regardless of what the caller passes: tags themselves add no visible width
+(DAK strips them before measuring columns), but arbitrary text would. An empty
+value is accepted (equivalent to never setting that key). Rejected up front in
+`parse_args`, alongside the existing "unknown key" check, so a typo is a
+command-line error (exit 1) rather than a mangled or truncated button.
+
+**Scope of `--details-fmt`.** Only the state line is ever styled; the name and
+time lines always render as `#[default]` once any `--details-fmt` key is
+set. Considered and rejected: letting the state's tag apply to the whole
+button (matches "whole line" more closely to how `--fmt` works on the
+summary), but the name is fixed per button and the time line's own colour
+carries no information the state doesn't already have, so styling either
+would only add configuration surface with no expressive benefit.
+
 ## 6c. podman blocks while a container is removed: time limits and placeholders (0.2.2)
 
 Reported symptom: DAK's button showed "Error" whenever a container was
