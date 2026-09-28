@@ -20,6 +20,21 @@ parses this structure to build each GitHub Release's body, printing from a
 No releases yet - this file gains its first `## vYYYY.MM.DD` entry when the
 first collection-wide tag is cut.
 
+## v2026.09.28-1 — gnome-next-meeting 0.4.0
+
+### User-facing changes
+- New: `gnome-next-meeting` can colour its DAK button's countdown lines.
+  `--fmt KEYS=TAGS` styles a not-yet-started line (`start`, or `soon` once
+  fewer than `--soon` minutes remain) and an in-progress line (`end`, or
+  `ending` once fewer than `--ending` minutes remain), plus `none` for the
+  `----` marker shown when nothing is left. Needs DAK >= 0.13 with markup
+  left at its default `"tmux"`. Without `--fmt`, output is unchanged.
+
+### Details
+- See `gnome-next-meeting/RELEASE_NOTES.md` (v0.4.0) and `NOTES.md`
+  ("Colouring buttons with DAK's tmux-style tags").
+- `opencode-podman-status` is unchanged and re-released at 0.3.0.
+
 ## v2026.09.28 — opencode-podman-status 0.3.0
 
 ### User-facing changes

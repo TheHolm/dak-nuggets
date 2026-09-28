@@ -28,9 +28,12 @@ meetings each keep their own line, and '----' means nothing is left today. At
 most three lines are printed unless --lines says otherwise, three being what a
 DAK button LCD can display.
 
-Intended for DAK's text_exec setup type, but usable from any script."
+Intended for DAK's text_exec setup type, but usable from any script.
+
+--fmt optionally wraps countdown lines in DAK's tmux-style colour tags, e.g.
+to turn a button red only once a meeting is about to start or end."
 
 # The major.minor this text was last checked against. Patch digits are
 # deliberately ignored: a patch release changes no behaviour by definition, so
 # it cannot invalidate the description.
-PKG_METADATA_REVIEWED_FOR="0.3"
+PKG_METADATA_REVIEWED_FOR="0.4"

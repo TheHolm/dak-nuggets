@@ -10,7 +10,9 @@ Prints one six-character countdown per line for the rest of today's meetings
 progress ends — or `----` when nothing is left. Intended to be run by DAK via
 `text_exec`, whose LCD shows the first six characters of the first three
 lines, which is why the default line limit is three. The block can optionally
-be wrapped with `--before` / `--after` text.
+be wrapped with `--before` / `--after` text, and (since 0.4.0) countdown lines
+can be wrapped in DAK's own `#[...]` colour tags via `--fmt`/`--soon`/
+`--ending` — see "Colouring buttons" below.
 
 ## Dependencies / build
 
@@ -38,14 +40,17 @@ be wrapped with `--before` / `--after` text.
 The decision/formatting logic lives in `next_meeting.c` / `next_meeting.h`
 (the `NextMeeting` collection, `nm_consider()`, `nm_sort()`, `nm_format()`,
 `nm_key()`, plus the `nm_expand_escapes()` / `nm_decorate()` decoration
-helpers and `nm_help_summary()`), deliberately split out from `main.c` so it
-can be tested with plain `time_t` values and no Evolution Data Server, D-Bus
-session, or `ICalTime` objects. `main.c` keeps only the EDS glue (registry,
-calendars, `i_cal_time_*` conversion), the `instance_cb` adapter that
-translates an `ICalTime` instance into a call to `nm_consider()`, and the GLib
-`GOptionContext` command-line parsing.
+helpers, `nm_apply_fmt()` / `nm_threshold_seconds()`, and `nm_help_summary()`),
+deliberately split out from `main.c` so it can be tested with plain `time_t`
+values and no Evolution Data Server, D-Bus session, or `ICalTime` objects.
+`main.c` keeps only the EDS glue (registry, calendars, `i_cal_time_*`
+conversion), the `instance_cb` adapter that translates an `ICalTime` instance
+into a call to `nm_consider()`, and the GLib `GOptionContext` command-line
+parsing that calls into the above - the last of which is exercised end to
+end by `test-cli.sh` (see below), since it needs the real compiled binary
+rather than being unit-testable in isolation.
 
-`test_next_meeting.c` uses GLib's `GTest` framework (39 cases) and covers: the
+`test_next_meeting.c` uses GLib's `GTest` framework (51 cases) and covers: the
 `----` marker; start and end line formatting including the space/`-` markers;
 sub-minute truncation; a meeting starting exactly now counting as in progress;
 a meeting that began yesterday, and one spanning the whole of today from both
@@ -59,8 +64,14 @@ ends past midnight (`-27:15`) and the `99:59` clamp; `nm_clear()` being
 idempotent and re-init clearing state; a full clashing-meetings scenario;
 escape expansion (`\n`, `\t`, `\\`, passthrough of unrecognised/trailing
 backslashes, NULL); decoration (both/one/no sides, the `----` marker, and
-wrapping a multi-line block once); and the help summary with and without a
-version. Run them with `make test` (or `meson test -C build`).
+wrapping a multi-line block once); the help summary with and without a
+version; and (since 0.4.0) `--fmt`/`--soon`/`--ending`: value validation,
+`KEYS=TAGS` parsing (multiple keys, later-wins, every error case), each of the
+five tag keys applied to its own kind of line, the `--soon`/`--ending`
+boundary being exclusive on the "soon"/"ending" side, an unset key always
+rendering `#[default]` rather than borrowing another key's tag, and
+`--before`/`--after` staying untagged. Run them with `make test` (or
+`meson test -C build`).
 
 ### Coverage
 
@@ -74,15 +85,51 @@ The report is filtered to `next_meeting.c` on purpose. `main.c` is the EDS glue
 that no unit test can reach — it is verified by hand instead (see below) — so
 including it would only dilute the number into meaninglessness.
 
-As of v0.3.0 that file is at **100% line coverage (115/115)** and 92% branch
-coverage (65/70). The five unhit branches are all inside GLib's
-`g_string_append_c()`, which is an always-inline function whose
-`G_UNLIKELY (gstring == NULL)` / `val == NULL` guards cannot be reached from
-here — so every branch of this program's own logic is covered. Two branches
-worth knowing about are only reachable through deliberate tests rather than
-normal use: `nm_event_compare()`'s `return 0` (needs an exact duplicate event)
-and `nm_format_event()`'s `remaining < 0` clamp (needs `nm->now` to be moved
+As of v0.4.0 that file is at **100% line coverage (210/210)** and 96% branch
+coverage (131/136). The five unhit branches are unchanged from earlier
+releases: they are all inside GLib's `g_string_append_c()`, an always-inline
+function whose `G_UNLIKELY (gstring == NULL)` / `val == NULL` guards cannot
+be reached from any of its five call sites in `nm_expand_escapes()` — so
+every branch of this program's own logic, including all of the 0.4.0
+`--fmt`/`--soon`/`--ending` code, is covered. That coverage specifically
+exercises the "0x7f" side of the control-character `||` check in
+`nm_is_valid_format_value()`, every combination of a single `NmFormats` field
+being the only one set in `nm_formats_is_empty()`, and the "soon" and
+"ending" keys reached through `nm_apply_fmt()` itself rather than only by
+poking the struct directly in a test. Two branches worth knowing about are
+only reachable through deliberate tests rather than normal use:
+`nm_event_compare()`'s `return 0` (needs an exact duplicate event) and
+`nm_format_event()`'s `remaining < 0` clamp (needs `nm->now` to be moved
 forward after collection, i.e. a clock jump).
+
+### `main.c`'s own argument validation: `test-cli.sh`
+
+`main.c` itself has no automated tests of its own beyond this: it is a thin
+GOptionContext wrapper around EDS calls that no unit test can reach.
+`test-cli.sh` (registered as the Meson test `cli-argument-validation`, run by
+the same `make test`/`meson test -C build`) closes the one part of that gap
+which *is* reachable without EDS: every argument-validation failure path in
+`main.c` runs and exits (1, with a message on stderr) before EDS is ever
+touched, precisely so a bad argument fails fast - see "Behaviour / quirks"
+below. It is a POSIX `sh` script rather than a `GTest` case because what is
+being tested is the compiled binary's own exit status and stderr, not a
+function call; `meson.build` passes it the built `gnome-next-meeting`
+executable object directly as `args`, which Meson resolves to that
+executable's path and - importantly - makes the test depend on it having
+been built first, rather than a plain string that could point at a stale
+binary from an earlier build.
+
+It covers: every `--fmt` rejection in `nm_apply_fmt()` (no `=`, an empty key
+list, an unknown key, a value not made only of `#[...]` tags); `--soon`/
+`--ending` at 0 and negative; a valid `--fmt` not bypassing a subsequent bad
+`--soon` (the compound `!nm_threshold_seconds(...) || !nm_threshold_seconds(...)`
+check in `main.c` really does check both); `--lines 0` (already checked
+before 0.4.0, but never actually tested until this); GLib's own
+option-parsing errors (a non-integer `--soon`, an unknown flag); and
+`--help` exiting 0 with empty stderr and mentioning the version plus
+`--fmt`/`--soon`/`--ending`, so a future rename of one of them fails this
+test. What it deliberately does not attempt is a successful run: that needs
+a live EDS session, so it stays manual (see below and "Known gaps").
 
 ## Behaviour / quirks
 
@@ -161,6 +208,84 @@ forward after collection, i.e. a clock jump).
   trailing one) is passed through unchanged. Option parsing uses GLib's
   `GOptionContext`, which also provides `--help` (carrying the version via
   `g_option_context_set_summary()`) and unknown-option handling for free.
+
+## Colouring buttons with DAK's tmux-style tags (0.4.0)
+
+DAK >= 0.13.0 draws button text through a small tmux-style markup parser
+(`#[fg=red,bold]` etc; `markup` defaults to `"tmux"`, and can be set to
+`"none"` per button or in `defaults`). `--fmt` lets a `text_exec` command wrap
+its own countdown lines in these tags without any DAK-side post-processing,
+mirroring `opencode-podman-status`'s `--fmt`/`--details-fmt` (see that
+program's NOTES.md §6d for the fuller design writeup this borrows from) but
+adapted to what changes here: not a count or a fixed set of states, but how
+far away a countdown is.
+
+**Five keys, two independent thresholds.** `start`/`end` cover a
+not-yet-started/in-progress line normally; `soon`/`ending` cover the same two
+line kinds once the remaining time drops under a threshold — `--soon MINUTES`
+for `soon`, `--ending MINUTES` for `ending`, each defaulting to
+`NM_DEFAULT_SOON_MINUTES`/`NM_DEFAULT_ENDING_MINUTES` (10) and rejected below
+1 (`nm_threshold_seconds()`). `none` covers the `----` marker. Two thresholds
+rather than one shared one because the user explicitly wanted "about to
+start" and "about to end" configurable independently - a meeting starting in
+2 minutes and one ending in 2 minutes can matter differently enough to want
+different windows (e.g. flagging an imminent start further out than an
+imminent end, since preparing for a meeting typically needs more lead time
+than wrapping one up).
+
+**No fallback between keys - not even related ones.** This is the one
+material difference from `opencode-podman-status`'s design, and was an
+explicit user decision after an earlier draft had `soon` fall back to
+`start`, `ending` fall back to `end`, and eventually to `#[default]` (mirroring
+podman's zero/`unknown` fallback chain). The user rejected that: once *any*
+`--fmt` key is set at all, a line whose own key was never set renders as
+`#[default]`, full stop - it does not matter that `start` is set if `soon`
+is not, and it does not matter that `end` is set if `ending` is not. Setting
+`start` alone does *not* implicitly cover the "soon" window at all; callers
+who want one colour across both windows must say so explicitly
+(`--fmt start,soon=...`). `nm_format_event()` therefore picks exactly one of
+`fmt->start`/`fmt->soon` (or `fmt->end`/`fmt->ending`) per line based purely on
+the threshold comparison, and falls back straight to `NM_DEFAULT_TAG` with no
+intermediate step.
+
+**Plain by default**, exactly as in the podman program: `nm_formats_is_empty()`
+(true for a freshly `nm_formats_init()`'d value, or NULL) short-circuits both
+`nm_format()` and `nm_format_event()` back to the pre-0.4.0 plain strings, so
+existing configs and any exact-match tooling see no change until `--fmt` is
+used at all.
+
+**`--before`/`--after` are deliberately never tagged.** Only the countdown
+lines `nm_format()` itself renders get a leading tag; `nm_decorate()` wraps
+the (already-tagged) block in `before`/`after` completely unchanged. This
+was an explicit design choice, not an oversight: unlike the summary/detail
+line boundaries in the podman program, `--before`/`--after` text is
+free-form and arbitrary-length, so auto-inserting a tag around it either
+would not compose predictably with a caller's own tags or would need its own
+opinionated escaping rules. If `--after` immediately follows a tagged
+countdown line, DAK's markup parser carries that line's style into it (tags
+"carry over to the following lines until changed", per DAK's own docs); a
+caller who wants `--after` left plain puts `#[default]` in it themselves,
+which is already valid `--after` text since that option's only processing is
+`nm_expand_escapes()`.
+
+**Threshold is measured on the un-clamped remaining time**, not on the
+`hours`/`minutes` already clamped to `NM_MAX_HOURS`/`NM_MAX_MINUTES` for
+display - not that it matters in practice (an event thousands of hours away is
+never going to be "soon"), but it keeps the threshold comparison correct in
+principle regardless of how the six-character line ends up looking.
+
+**Validation** (`nm_is_valid_format_value()`) is a straight C port of
+`opencode-podman-status`'s `render::is_valid_format_value` (Rust): a value
+must be made only of `#[...]` groups, no bare text, no control character
+anywhere (checked as `(guchar)*p < 0x20 || (guchar)*p == 0x7f`, i.e. C0
+controls and DEL - a UTF-8 continuation/lead byte is always `>= 0x80` so this
+never misfires on non-ASCII tag content), every `#[` closed by a `]` in the
+same value. An empty value is accepted (equivalent to never setting that
+key). `nm_apply_fmt()` validates and applies one `--fmt KEYS=TAGS` argument
+directly against `GError`, so a bad argument is reported by `main.c` and
+exits 1 *before* connecting to EDS at all - `--fmt`/`--soon`/`--ending` are
+all validated up front, right after the `--lines` check, specifically so a
+typo does not cost the time an EDS connection takes only to then fail.
 
 ## API gotcha: `e_cal_client_connect_sync` return type
 
@@ -276,12 +401,15 @@ not actually in the past.
 
 ## Known gaps
 
-- The unit tests cover the pure decision/formatting logic (`next_meeting.c`)
-  only, at 100% line coverage. The EDS glue in `main.c` (registry connection,
-  calendar enumeration, `i_cal_time_*` conversion, the `instance_cb` adapter)
-  is not covered by automated tests, since exercising it needs a live EDS
-  session — but it *has* now been verified manually end to end with real
-  `VEVENT`s, using the seeding and probing recipes above. Cases confirmed: an
+- The unit tests (`test_next_meeting.c`) cover the pure decision/formatting
+  logic (`next_meeting.c`) at 100% line coverage, and `test-cli.sh` covers
+  `main.c`'s own argument validation end to end against the real binary (see
+  "Test layout" above). What remains uncovered by automated tests is the EDS
+  glue proper in `main.c` (registry connection, calendar enumeration,
+  `i_cal_time_*` conversion, the `instance_cb` adapter) — the part that
+  cannot run without a live EDS session — but it *has* now been verified
+  manually end to end with real `VEVENT`s, using the seeding and probing
+  recipes above. Cases confirmed: an
   empty calendar (`----`), a meeting in progress, two clashing meetings each
   keeping a line, the three-line default truncation, an all-day event being
   ignored, an already-finished event being ignored, a meeting running past

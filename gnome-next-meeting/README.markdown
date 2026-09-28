@@ -47,6 +47,12 @@ the meeting's identity, so the order never changes between runs.
 - `--lines N` (`-l`) — print at most `N` countdown lines (default 3, minimum 1)
 - `--before TEXT` (`-b`) — printed before the countdowns
 - `--after TEXT` (`-a`) — printed after the countdowns
+- `--fmt KEYS=TAGS` — colour countdown lines with DAK tags; see
+  [Colouring buttons](#colouring-buttons)
+- `--soon MINUTES` — threshold for the `soon` key (default 10, minimum 1);
+  see [Colouring buttons](#colouring-buttons)
+- `--ending MINUTES` — threshold for the `ending` key (default 10, minimum 1);
+  see [Colouring buttons](#colouring-buttons)
 - `--help` (`-h`) — usage summary, including the program version
 
 Within `TEXT`, the escapes `\n`, `\t` and `\\` are expanded to a newline, a
@@ -64,6 +70,55 @@ Next:
  01:15
 ```
 
+### Colouring buttons
+
+DAK (>= 0.13, with `markup` left at its default `"tmux"`) understands
+tmux-style tags such as `#[fg=red,bold]` in button text. `--fmt` wraps this
+program's own countdown lines in tags of your choosing, so a button can turn
+red when a meeting is about to start and stay grey otherwise. With no `--fmt`
+given, output is exactly the plain text shown under [Output](#output) —
+nothing changes unless you ask for it.
+
+`--fmt` takes one argument shaped `KEYS=TAGS`: `KEYS` is one or more
+comma-separated keys, and `TAGS` is one or more DAK `#[...]` tags applied to
+every named key. Give `--fmt` again to set more keys; setting the same key
+twice keeps the later value. `TAGS` must be made only of `#[...]` tags — no
+plain text, no newlines — since that is what keeps every line six characters
+wide.
+
+The keys are:
+
+- `start` — a not-yet-started meeting whose countdown is at or above the
+  `--soon` threshold
+- `soon` — a not-yet-started meeting whose countdown is below the `--soon`
+  threshold (default 10 minutes)
+- `end` — a meeting in progress whose countdown is at or above the
+  `--ending` threshold
+- `ending` — a meeting in progress whose countdown is below the `--ending`
+  threshold (default 10 minutes)
+- `none` — the `----` no-meetings marker
+
+Once any key is set, every countdown line gets a tag: the one configured for
+its own key, or plain `#[default]` for a key you left out. Keys never borrow
+from one another — leaving `soon` unset does *not* fall back to `start`'s
+tag, so a meeting five minutes out renders in `#[default]` unless `soon`
+itself is set. Set both explicitly (`--fmt start,soon=...`) for the same
+colour regardless of how soon it is.
+
+```
+$ gnome-next-meeting --fmt start,end='#[fg=gray]' \
+    --fmt soon='#[fg=yellow,bold]' --soon 10 \
+    --fmt ending='#[fg=red,bold]' --ending 5
+```
+
+Grey while nothing is imminent, yellow for a meeting starting inside 10
+minutes, red for one about to end inside 5.
+
+`--before`/`--after` text is never tagged — only the countdown lines
+themselves are. If `--after` text follows a tagged line, it inherits that
+line's style until DAK's markup parser sees something else; put your own
+`#[default]` in `--after` if you need it left untouched.
+
 ## DAK integration
 
 The output is plain text, so it fits DAK's `text_exec` setup type directly.
@@ -73,6 +128,16 @@ A typical button showing the countdowns refreshed every minute:
 {
   "type": "text_exec",
   "params": "gnome-next-meeting",
+  "refresh": 60
+}
+```
+
+With colour, see [Colouring buttons](#colouring-buttons):
+
+```json
+{
+  "type": "text_exec",
+  "params": "gnome-next-meeting --fmt start,end='#[fg=gray]' --fmt soon,ending='#[fg=red,bold]'",
   "refresh": 60
 }
 ```
@@ -105,15 +170,16 @@ The `Makefile` in this directory wraps Meson so the root `make` targets work.
 
 ## Test
 
-Run the unit tests (the decision/formatting logic in `next_meeting.c`, no
-live EDS needed):
+Run the unit tests (the decision/formatting logic in `next_meeting.c`, plus
+the command-line argument validation in `main.c` run against the real built
+binary — neither needs a live EDS session):
 
 ```
 make test
 ```
 
-For a coverage report of that logic (needs `gcovr`; on Debian/Ubuntu
-`sudo apt install gcovr`):
+For a coverage report of the decision/formatting logic (needs `gcovr`; on
+Debian/Ubuntu `sudo apt install gcovr`):
 
 ```
 make coverage

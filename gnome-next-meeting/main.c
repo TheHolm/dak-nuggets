@@ -123,6 +123,15 @@ main(int argc, char *argv[])
 
     gint lines = NM_DEFAULT_LINES;
 
+    /*
+     * --fmt is repeatable; each element is one "KEYS=TAGS" argument, applied
+     * in order via nm_apply_fmt() below. --soon/--ending each take a single
+     * integer, validated and converted to seconds via nm_threshold_seconds().
+     */
+    g_auto(GStrv) fmt_specs = NULL;
+    gint soon_minutes = NM_DEFAULT_SOON_MINUTES;
+    gint ending_minutes = NM_DEFAULT_ENDING_MINUTES;
+
     GOptionEntry options[] = {
         {
             "before", 'b', 0, G_OPTION_ARG_STRING, &before,
@@ -138,6 +147,25 @@ main(int argc, char *argv[])
             "lines", 'l', 0, G_OPTION_ARG_INT, &lines,
             "maximum number of countdown lines to print (default 3)",
             "N"
+        },
+        {
+            "fmt", 0, 0, G_OPTION_ARG_STRING_ARRAY, &fmt_specs,
+            "DAK #[...] tags for countdown lines (KEYS=TAGS; KEYS is a "
+            "comma list of start,soon,end,ending,none; repeatable, last "
+            "setting of a key wins)",
+            "KEYS=TAGS"
+        },
+        {
+            "soon", 0, 0, G_OPTION_ARG_INT, &soon_minutes,
+            "minutes before a meeting starts for its line to use the "
+            "'soon' --fmt key instead of 'start' (default 10, minimum 1)",
+            "MINUTES"
+        },
+        {
+            "ending", 0, 0, G_OPTION_ARG_INT, &ending_minutes,
+            "minutes before a meeting in progress ends for its line to use "
+            "the 'ending' --fmt key instead of 'end' (default 10, minimum 1)",
+            "MINUTES"
         },
         { NULL }
     };
@@ -170,6 +198,35 @@ main(int argc, char *argv[])
 
     if (lines < 1) {
         fprintf(stderr, "--lines must be at least 1\n");
+        return 1;
+    }
+
+    /*
+     * Build up the --fmt/--soon/--ending overrides before doing anything
+     * with EDS, so a bad argument is reported immediately rather than after
+     * however long connecting to the calendar backend takes.
+     */
+    NmFormats fmt;
+    nm_formats_init(&fmt);
+
+    if (fmt_specs != NULL) {
+        for (gsize i = 0; fmt_specs[i] != NULL; i++) {
+            if (!nm_apply_fmt(&fmt, fmt_specs[i], &error)) {
+                fprintf(stderr, "%s\n", error->message);
+                g_clear_error(&error);
+                nm_formats_clear(&fmt);
+                return 1;
+            }
+        }
+    }
+
+    if (!nm_threshold_seconds("--soon", soon_minutes, &fmt.soon_seconds,
+                              &error) ||
+        !nm_threshold_seconds("--ending", ending_minutes, &fmt.ending_seconds,
+                              &error)) {
+        fprintf(stderr, "%s\n", error->message);
+        g_clear_error(&error);
+        nm_formats_clear(&fmt);
         return 1;
     }
 
@@ -295,12 +352,13 @@ main(int argc, char *argv[])
     g_list_free_full(sources, g_object_unref);
     g_object_unref(registry);
 
-    gchar *out = nm_decorate(&nm, (guint)lines, before, after);
+    gchar *out = nm_decorate(&nm, (guint)lines, before, after, &fmt);
 
     printf("%s\n", out);
 
     g_free(out);
 
+    nm_formats_clear(&fmt);
     nm_clear(&nm);
 
     return 0;
