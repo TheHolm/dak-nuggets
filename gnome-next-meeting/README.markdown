@@ -170,15 +170,16 @@ The `Makefile` in this directory wraps Meson so the root `make` targets work.
 
 ## Test
 
-Run the unit tests (the decision/formatting logic in `next_meeting.c`, no
-live EDS needed):
+Run the unit tests (the decision/formatting logic in `next_meeting.c`, plus
+the command-line argument validation in `main.c` run against the real built
+binary — neither needs a live EDS session):
 
 ```
 make test
 ```
 
-For a coverage report of that logic (needs `gcovr`; on Debian/Ubuntu
-`sudo apt install gcovr`):
+For a coverage report of the decision/formatting logic (needs `gcovr`; on
+Debian/Ubuntu `sudo apt install gcovr`):
 
 ```
 make coverage

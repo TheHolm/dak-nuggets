@@ -40,12 +40,15 @@ can be wrapped in DAK's own `#[...]` colour tags via `--fmt`/`--soon`/
 The decision/formatting logic lives in `next_meeting.c` / `next_meeting.h`
 (the `NextMeeting` collection, `nm_consider()`, `nm_sort()`, `nm_format()`,
 `nm_key()`, plus the `nm_expand_escapes()` / `nm_decorate()` decoration
-helpers and `nm_help_summary()`), deliberately split out from `main.c` so it
-can be tested with plain `time_t` values and no Evolution Data Server, D-Bus
-session, or `ICalTime` objects. `main.c` keeps only the EDS glue (registry,
-calendars, `i_cal_time_*` conversion), the `instance_cb` adapter that
-translates an `ICalTime` instance into a call to `nm_consider()`, and the GLib
-`GOptionContext` command-line parsing.
+helpers, `nm_apply_fmt()` / `nm_threshold_seconds()`, and `nm_help_summary()`),
+deliberately split out from `main.c` so it can be tested with plain `time_t`
+values and no Evolution Data Server, D-Bus session, or `ICalTime` objects.
+`main.c` keeps only the EDS glue (registry, calendars, `i_cal_time_*`
+conversion), the `instance_cb` adapter that translates an `ICalTime` instance
+into a call to `nm_consider()`, and the GLib `GOptionContext` command-line
+parsing that calls into the above - the last of which is exercised end to
+end by `test-cli.sh` (see below), since it needs the real compiled binary
+rather than being unit-testable in isolation.
 
 `test_next_meeting.c` uses GLib's `GTest` framework (51 cases) and covers: the
 `----` marker; start and end line formatting including the space/`-` markers;
@@ -98,6 +101,35 @@ only reachable through deliberate tests rather than normal use:
 `nm_event_compare()`'s `return 0` (needs an exact duplicate event) and
 `nm_format_event()`'s `remaining < 0` clamp (needs `nm->now` to be moved
 forward after collection, i.e. a clock jump).
+
+### `main.c`'s own argument validation: `test-cli.sh`
+
+`main.c` itself has no automated tests of its own beyond this: it is a thin
+GOptionContext wrapper around EDS calls that no unit test can reach.
+`test-cli.sh` (registered as the Meson test `cli-argument-validation`, run by
+the same `make test`/`meson test -C build`) closes the one part of that gap
+which *is* reachable without EDS: every argument-validation failure path in
+`main.c` runs and exits (1, with a message on stderr) before EDS is ever
+touched, precisely so a bad argument fails fast - see "Behaviour / quirks"
+below. It is a POSIX `sh` script rather than a `GTest` case because what is
+being tested is the compiled binary's own exit status and stderr, not a
+function call; `meson.build` passes it the built `gnome-next-meeting`
+executable object directly as `args`, which Meson resolves to that
+executable's path and - importantly - makes the test depend on it having
+been built first, rather than a plain string that could point at a stale
+binary from an earlier build.
+
+It covers: every `--fmt` rejection in `nm_apply_fmt()` (no `=`, an empty key
+list, an unknown key, a value not made only of `#[...]` tags); `--soon`/
+`--ending` at 0 and negative; a valid `--fmt` not bypassing a subsequent bad
+`--soon` (the compound `!nm_threshold_seconds(...) || !nm_threshold_seconds(...)`
+check in `main.c` really does check both); `--lines 0` (already checked
+before 0.4.0, but never actually tested until this); GLib's own
+option-parsing errors (a non-integer `--soon`, an unknown flag); and
+`--help` exiting 0 with empty stderr and mentioning the version plus
+`--fmt`/`--soon`/`--ending`, so a future rename of one of them fails this
+test. What it deliberately does not attempt is a successful run: that needs
+a live EDS session, so it stays manual (see below and "Known gaps").
 
 ## Behaviour / quirks
 
@@ -369,12 +401,15 @@ not actually in the past.
 
 ## Known gaps
 
-- The unit tests cover the pure decision/formatting logic (`next_meeting.c`)
-  only, at 100% line coverage. The EDS glue in `main.c` (registry connection,
-  calendar enumeration, `i_cal_time_*` conversion, the `instance_cb` adapter)
-  is not covered by automated tests, since exercising it needs a live EDS
-  session — but it *has* now been verified manually end to end with real
-  `VEVENT`s, using the seeding and probing recipes above. Cases confirmed: an
+- The unit tests (`test_next_meeting.c`) cover the pure decision/formatting
+  logic (`next_meeting.c`) at 100% line coverage, and `test-cli.sh` covers
+  `main.c`'s own argument validation end to end against the real binary (see
+  "Test layout" above). What remains uncovered by automated tests is the EDS
+  glue proper in `main.c` (registry connection, calendar enumeration,
+  `i_cal_time_*` conversion, the `instance_cb` adapter) — the part that
+  cannot run without a live EDS session — but it *has* now been verified
+  manually end to end with real `VEVENT`s, using the seeding and probing
+  recipes above. Cases confirmed: an
   empty calendar (`----`), a meeting in progress, two clashing meetings each
   keeping a line, the three-line default truncation, an all-day event being
   ignored, an already-finished event being ignored, a meeting running past
