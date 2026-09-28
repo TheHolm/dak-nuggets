@@ -26,11 +26,13 @@ build system fits its job, and documents itself in its own subdirectory.
 
 ### `gnome-next-meeting`
 
-Prints the time until the next calendar event for today, in `HH:MM` format
-(`----` when nothing remains). Reads the enabled calendars from Evolution
-Data Server (EDS), so it works with GNOME Calendar/Evolution.
+Prints a countdown to each of today's remaining calendar meetings, one per
+six-character line and soonest first (`----` when nothing remains). Reads
+the enabled calendars from Evolution Data Server (EDS), so it works with
+GNOME Calendar/Evolution. `--fmt` can wrap lines in DAK's own colour tags,
+e.g. to turn a button red once a meeting is about to start.
 
-Typical DAK use — show the countdown on a button:
+Typical DAK use — show the countdowns on a button:
 
 ```json
 {

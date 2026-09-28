@@ -1,5 +1,32 @@
 # Release notes — gnome-next-meeting
 
+## v0.4.0
+
+- **New: colour buttons with DAK's tmux-style tags.** DAK (>= 0.13, `markup`
+  left at its default `"tmux"`) understands tags like `#[fg=red,bold]` in
+  button text. `--fmt KEYS=TAGS` wraps this program's own countdown lines in
+  such tags:
+  - `KEYS` is one or more comma-separated keys: `start`/`end` for a
+    not-yet-started/in-progress line normally, `soon`/`ending` for the same
+    two line kinds once the remaining time drops under a threshold
+    (`--soon MINUTES`/`--ending MINUTES`, each defaulting to 10 and rejected
+    below 1), and `none` for the `----` no-meetings marker.
+  - `--fmt` is repeatable and takes a comma-separated key list before the
+    `=`; a later use of the same key overrides an earlier one. `TAGS` must be
+    made only of `#[...]` tags - no bare text, no newlines - rejected at
+    startup otherwise (a bad command line, same as any other), and before
+    connecting to the calendar backend at all.
+  - With no `--fmt` given, output is byte-for-byte the old plain text. With
+    any `--fmt` key set, every countdown line - including `----` - gets a
+    leading tag: the one configured for that line's own key, or `#[default]`
+    for a key left unset. Keys never fall back to a related one: leaving
+    `soon` unset does **not** borrow `start`'s tag (and likewise `ending`
+    from `end`), so a line whose exact key was never given always renders
+    `#[default]` regardless of what any other key was set to.
+  - `--before`/`--after` text is never tagged; only the countdown lines
+    `nm_format()` renders get one.
+  - See [Colouring buttons](README.markdown#colouring-buttons).
+
 ## v0.3.3
 
 - The FreeBSD `.pkg` declared far more runtime dependencies than

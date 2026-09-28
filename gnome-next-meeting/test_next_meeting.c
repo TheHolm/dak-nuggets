@@ -32,7 +32,7 @@ test_no_meeting(void)
     NextMeeting nm;
     nm_init(&nm, NOW);
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, "----");
 
     nm_clear(&nm);
@@ -51,7 +51,7 @@ test_future_meeting(void)
     g_assert_true(nm_consider(&nm, FALSE, NOW + MINUTES(90),
                               NOW + MINUTES(150), KEY_LOW));
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, " 01:30");
 
     nm_clear(&nm);
@@ -70,7 +70,7 @@ test_meeting_in_progress(void)
     g_assert_true(nm_consider(&nm, FALSE, NOW - MINUTES(35),
                               NOW + MINUTES(25), KEY_LOW));
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, "-00:25");
 
     nm_clear(&nm);
@@ -92,7 +92,7 @@ test_meeting_started_yesterday(void)
     g_assert_true(nm_consider(&nm, FALSE, NOW - HOURS(29),
                               NOW + MINUTES(105), KEY_LOW));
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, "-01:45");
 
     nm_clear(&nm);
@@ -112,7 +112,7 @@ test_meeting_spanning_whole_day(void)
     g_assert_true(nm_consider(&nm, FALSE, NOW - HOURS(29), NOW + HOURS(26),
                               KEY_LOW));
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, "-26:00");
 
     nm_clear(&nm);
@@ -130,7 +130,7 @@ test_meeting_starting_exactly_now(void)
 
     g_assert_true(nm_consider(&nm, FALSE, NOW, NOW + MINUTES(60), KEY_LOW));
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, "-01:00");
 
     nm_clear(&nm);
@@ -149,7 +149,7 @@ test_meeting_one_second_away(void)
     g_assert_true(nm_consider(&nm, FALSE, NOW + 1, NOW + MINUTES(60),
                               KEY_LOW));
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, " 00:00");
 
     nm_clear(&nm);
@@ -167,7 +167,7 @@ test_seconds_are_truncated(void)
     g_assert_true(nm_consider(&nm, FALSE, NOW + 59, NOW + MINUTES(60),
                               KEY_LOW));
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, " 00:00");
 
     nm_clear(&nm);
@@ -187,7 +187,7 @@ test_finished_meetings_ignored(void)
                                KEY_LOW));
     g_assert_false(nm_consider(&nm, FALSE, NOW - HOURS(1), NOW, KEY_HIGH));
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, "----");
 
     nm_clear(&nm);
@@ -205,7 +205,7 @@ test_meeting_ending_one_second_away(void)
 
     g_assert_true(nm_consider(&nm, FALSE, NOW - HOURS(1), NOW + 1, KEY_LOW));
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, "-00:00");
 
     nm_clear(&nm);
@@ -226,7 +226,7 @@ test_all_day_ignored(void)
     g_assert_false(nm_consider(&nm, TRUE, NOW - HOURS(1), NOW + HOURS(1),
                                KEY_HIGH));
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, "----");
 
     nm_clear(&nm);
@@ -246,7 +246,7 @@ test_zero_length_meeting(void)
                               NOW + MINUTES(30), KEY_LOW));
     g_assert_false(nm_consider(&nm, FALSE, NOW, NOW, KEY_HIGH));
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, " 00:30");
 
     nm_clear(&nm);
@@ -267,7 +267,7 @@ test_end_before_start_treated_as_zero_length(void)
     g_assert_false(nm_consider(&nm, FALSE, NOW - MINUTES(10),
                                NOW - MINUTES(30), KEY_HIGH));
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, " 00:30");
 
     nm_clear(&nm);
@@ -291,7 +291,7 @@ test_events_sorted_soonest_first(void)
     g_assert_true(nm_consider(&nm, FALSE, NOW - MINUTES(5), NOW + MINUTES(10),
                               KEY_LOW));
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, "-00:10\n 00:30\n 02:00");
 
     nm_clear(&nm);
@@ -312,10 +312,10 @@ test_max_lines_truncates(void)
                                   NOW + HOURS(i) + MINUTES(30), KEY_LOW));
     }
 
-    g_autofree gchar *two = nm_format(&nm, 2);
+    g_autofree gchar *two = nm_format(&nm, 2, NULL);
     g_assert_cmpstr(two, ==, " 01:00\n 02:00");
 
-    g_autofree gchar *one = nm_format(&nm, 1);
+    g_autofree gchar *one = nm_format(&nm, 1, NULL);
     g_assert_cmpstr(one, ==, " 01:00");
 
     nm_clear(&nm);
@@ -336,10 +336,10 @@ test_max_lines_bounds(void)
     g_assert_true(nm_consider(&nm, FALSE, NOW + HOURS(3), NOW + HOURS(4),
                               KEY_LOW));
 
-    g_autofree gchar *plenty = nm_format(&nm, 10);
+    g_autofree gchar *plenty = nm_format(&nm, 10, NULL);
     g_assert_cmpstr(plenty, ==, " 01:00\n 03:00");
 
-    g_autofree gchar *none = nm_format(&nm, 0);
+    g_autofree gchar *none = nm_format(&nm, 0, NULL);
     g_assert_cmpstr(none, ==, " 01:00");
 
     nm_clear(&nm);
@@ -365,8 +365,8 @@ test_simultaneous_events_ordered_by_key(void)
     nm_consider(&second, FALSE, NOW + HOURS(1), NOW + HOURS(3), KEY_LOW);
     nm_consider(&second, FALSE, NOW + HOURS(1), NOW + HOURS(2), KEY_HIGH);
 
-    g_autofree gchar *out_first = nm_format(&first, NM_DEFAULT_LINES);
-    g_autofree gchar *out_second = nm_format(&second, NM_DEFAULT_LINES);
+    g_autofree gchar *out_first = nm_format(&first, NM_DEFAULT_LINES, NULL);
+    g_autofree gchar *out_second = nm_format(&second, NM_DEFAULT_LINES, NULL);
 
     g_assert_cmpstr(out_first, ==, " 01:00\n 01:00");
     g_assert_cmpstr(out_first, ==, out_second);
@@ -389,7 +389,7 @@ test_simultaneous_events_ordered_by_kind(void)
     nm_consider(&nm, FALSE, NOW - HOURS(1), NOW + HOURS(1), KEY_LOW);
     nm_consider(&nm, FALSE, NOW + HOURS(1), NOW + HOURS(2), KEY_LOW);
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, " 01:00\n-01:00");
 
     nm_clear(&nm);
@@ -444,7 +444,7 @@ test_multi_hour_formatting(void)
                               NOW + HOURS(10) + MINUTES(5),
                               NOW + HOURS(11), KEY_LOW));
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, " 10:05");
 
     nm_clear(&nm);
@@ -463,7 +463,7 @@ test_end_past_midnight(void)
     g_assert_true(nm_consider(&nm, FALSE, NOW - HOURS(1),
                               NOW + HOURS(27) + MINUTES(15), KEY_LOW));
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, "-27:15");
 
     nm_clear(&nm);
@@ -482,7 +482,7 @@ test_long_countdown_clamped(void)
     g_assert_true(nm_consider(&nm, FALSE, NOW - HOURS(1), NOW + HOURS(500),
                               KEY_LOW));
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, "-99:59");
 
     nm_clear(&nm);
@@ -502,7 +502,7 @@ test_reinit_clears_state(void)
     nm_clear(&nm);
     nm_init(&nm, NOW);
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, "----");
 
     nm_clear(&nm);
@@ -543,7 +543,7 @@ test_clashing_meetings(void)
     /* Later still, and so pushed off the end of a three-line display. */
     nm_consider(&nm, FALSE, NOW + HOURS(8), NOW + HOURS(9), KEY_LOW);
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, "-00:10\n 00:10\n 00:40");
 
     nm_clear(&nm);
@@ -575,7 +575,7 @@ test_duplicate_event_collapses(void)
     nm_sort(&nm);
     g_assert_cmpuint(nm.events->len, ==, 1);
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, " 00:30");
 
     nm_clear(&nm);
@@ -596,7 +596,7 @@ test_duplicate_does_not_consume_a_line(void)
     nm_consider(&nm, FALSE, NOW + HOURS(2), NOW + HOURS(3), KEY_HIGH);
     nm_consider(&nm, FALSE, NOW + HOURS(4), NOW + HOURS(5), KEY_HIGH);
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, " 00:30\n 02:00\n 04:00");
 
     nm_clear(&nm);
@@ -618,7 +618,7 @@ test_clock_moved_forward(void)
 
     nm.now = NOW + HOURS(2);
 
-    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES);
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, NULL);
     g_assert_cmpstr(out, ==, " 00:00");
 
     nm_clear(&nm);
@@ -669,7 +669,7 @@ test_decorate_both_sides(void)
     nm_consider(&nm, FALSE, NOW + MINUTES(90), NOW + HOURS(2), KEY_LOW);
 
     g_autofree gchar *out =
-        nm_decorate(&nm, NM_DEFAULT_LINES, "In\\n", " to go");
+        nm_decorate(&nm, NM_DEFAULT_LINES, "In\\n", " to go", NULL);
     g_assert_cmpstr(out, ==, "In\n 01:30 to go");
 
     nm_clear(&nm);
@@ -686,7 +686,7 @@ test_decorate_no_decoration(void)
 
     nm_consider(&nm, FALSE, NOW + MINUTES(1), NOW + HOURS(1), KEY_LOW);
 
-    g_autofree gchar *out = nm_decorate(&nm, NM_DEFAULT_LINES, NULL, NULL);
+    g_autofree gchar *out = nm_decorate(&nm, NM_DEFAULT_LINES, NULL, NULL, NULL);
     g_assert_cmpstr(out, ==, " 00:01");
 
     nm_clear(&nm);
@@ -701,7 +701,7 @@ test_decorate_no_meeting(void)
     NextMeeting nm;
     nm_init(&nm, NOW);
 
-    g_autofree gchar *out = nm_decorate(&nm, NM_DEFAULT_LINES, "[", "]");
+    g_autofree gchar *out = nm_decorate(&nm, NM_DEFAULT_LINES, "[", "]", NULL);
     g_assert_cmpstr(out, ==, "[----]");
 
     nm_clear(&nm);
@@ -719,11 +719,11 @@ test_decorate_one_side(void)
     nm_consider(&nm, FALSE, NOW + MINUTES(30), NOW + HOURS(1), KEY_LOW);
 
     g_autofree gchar *before_only =
-        nm_decorate(&nm, NM_DEFAULT_LINES, "<", NULL);
+        nm_decorate(&nm, NM_DEFAULT_LINES, "<", NULL, NULL);
     g_assert_cmpstr(before_only, ==, "< 00:30");
 
     g_autofree gchar *after_only =
-        nm_decorate(&nm, NM_DEFAULT_LINES, NULL, ">");
+        nm_decorate(&nm, NM_DEFAULT_LINES, NULL, ">", NULL);
     g_assert_cmpstr(after_only, ==, " 00:30>");
 
     nm_clear(&nm);
@@ -742,15 +742,368 @@ test_decorate_wraps_whole_block(void)
     nm_consider(&nm, FALSE, NOW - MINUTES(5), NOW + MINUTES(5), KEY_LOW);
     nm_consider(&nm, FALSE, NOW + MINUTES(30), NOW + HOURS(1), KEY_LOW);
 
-    g_autofree gchar *out = nm_decorate(&nm, NM_DEFAULT_LINES, "[", "]");
+    g_autofree gchar *out = nm_decorate(&nm, NM_DEFAULT_LINES, "[", "]", NULL);
     g_assert_cmpstr(out, ==, "[-00:05\n 00:30]");
 
     nm_clear(&nm);
 }
 
 /**
- * The help summary names the program and the version it was built from.
+ * A --fmt value must be made only of #[...] tags: no bare text, no unclosed
+ * tag, no control character, but an empty value is fine (equivalent to
+ * never setting that key).
  */
+static void
+test_validates_format_values(void)
+{
+    g_assert_true(nm_is_valid_format_value(""));
+    g_assert_true(nm_is_valid_format_value("#[fg=red]"));
+    g_assert_true(nm_is_valid_format_value("#[fg=red,bold]"));
+    g_assert_true(nm_is_valid_format_value("#[fg=red]#[bold]"));
+    g_assert_false(nm_is_valid_format_value("plain text"));
+    g_assert_false(nm_is_valid_format_value("#[fg=red] extra"));
+    g_assert_false(nm_is_valid_format_value("#[fg=red"));
+    g_assert_false(nm_is_valid_format_value("#[fg=red]\n"));
+    /* "#" not followed by "[" at all. */
+    g_assert_false(nm_is_valid_format_value("#nope"));
+    /* A control character inside an otherwise well-formed tag: 0x01 hits
+     * the "< 0x20" side of the check, 0x7f (DEL) hits the "== 0x7f" side. */
+    g_assert_false(nm_is_valid_format_value("#[fg=\x01red]"));
+    g_assert_false(nm_is_valid_format_value("#[fg=\x7fred]"));
+    g_assert_false(nm_is_valid_format_value(NULL));
+}
+
+/**
+ * nm_formats_is_empty() is true for NULL and for a freshly nm_formats_init()'d
+ * value, and false as soon as any single tag field is set - individually,
+ * so no field is skipped by a short-circuited check.
+ */
+static void
+test_formats_is_empty(void)
+{
+    g_assert_true(nm_formats_is_empty(NULL));
+
+    NmFormats fmt;
+    nm_formats_init(&fmt);
+    g_assert_true(nm_formats_is_empty(&fmt));
+
+    fmt.start = g_strdup("#[fg=red]");
+    g_assert_false(nm_formats_is_empty(&fmt));
+    g_free(fmt.start);
+    fmt.start = NULL;
+
+    fmt.soon = g_strdup("#[fg=red]");
+    g_assert_false(nm_formats_is_empty(&fmt));
+    g_free(fmt.soon);
+    fmt.soon = NULL;
+
+    fmt.end = g_strdup("#[fg=red]");
+    g_assert_false(nm_formats_is_empty(&fmt));
+    g_free(fmt.end);
+    fmt.end = NULL;
+
+    fmt.ending = g_strdup("#[fg=red]");
+    g_assert_false(nm_formats_is_empty(&fmt));
+    g_free(fmt.ending);
+    fmt.ending = NULL;
+
+    fmt.none = g_strdup("#[fg=red]");
+    g_assert_false(nm_formats_is_empty(&fmt));
+    g_free(fmt.none);
+    fmt.none = NULL;
+
+    g_assert_true(nm_formats_is_empty(&fmt));
+}
+
+/**
+ * One --fmt KEYS=TAGS sets every key in a comma-separated list to the same
+ * tag; a later call for the same key overrides the earlier value, and other
+ * keys set alongside it are left alone.
+ */
+static void
+test_apply_fmt_sets_multiple_keys(void)
+{
+    NmFormats fmt;
+    nm_formats_init(&fmt);
+
+    GError *error = NULL;
+
+    g_assert_true(nm_apply_fmt(&fmt, "start,end,none=#[fg=gray]", &error));
+    g_assert_no_error(error);
+    g_assert_cmpstr(fmt.start, ==, "#[fg=gray]");
+    g_assert_cmpstr(fmt.end, ==, "#[fg=gray]");
+    g_assert_cmpstr(fmt.none, ==, "#[fg=gray]");
+    g_assert_null(fmt.soon);
+    g_assert_null(fmt.ending);
+
+    g_assert_true(nm_apply_fmt(&fmt, "soon,ending=#[fg=red,bold]", &error));
+    g_assert_no_error(error);
+    g_assert_cmpstr(fmt.soon, ==, "#[fg=red,bold]");
+    g_assert_cmpstr(fmt.ending, ==, "#[fg=red,bold]");
+
+    g_assert_true(nm_apply_fmt(&fmt, "end=#[fg=red,bold]", &error));
+    g_assert_no_error(error);
+    g_assert_cmpstr(fmt.start, ==, "#[fg=gray]");
+    g_assert_cmpstr(fmt.end, ==, "#[fg=red,bold]");
+
+    nm_formats_clear(&fmt);
+}
+
+/**
+ * A bad --fmt argument - no "=", an empty key list, an unknown key or a
+ * value that is not made only of #[...] tags - is rejected, reports a
+ * message, and leaves the formats untouched.
+ */
+static void
+test_apply_fmt_rejects_bad_specs(void)
+{
+    NmFormats fmt;
+    nm_formats_init(&fmt);
+
+    GError *error = NULL;
+
+    g_assert_false(nm_apply_fmt(&fmt, "start", &error));
+    g_assert_nonnull(error);
+    g_clear_error(&error);
+
+    g_assert_false(nm_apply_fmt(&fmt, "=#[fg=red]", &error));
+    g_assert_nonnull(error);
+    g_clear_error(&error);
+
+    g_assert_false(nm_apply_fmt(&fmt, "nope=#[fg=red]", &error));
+    g_assert_nonnull(error);
+    g_clear_error(&error);
+
+    g_assert_false(nm_apply_fmt(&fmt, "start=plain text", &error));
+    g_assert_nonnull(error);
+    g_clear_error(&error);
+
+    g_assert_true(nm_formats_is_empty(&fmt));
+
+    nm_formats_clear(&fmt);
+}
+
+/**
+ * --soon/--ending must be at least 1; a valid value converts cleanly to
+ * seconds, and the error message names the flag that was given.
+ */
+static void
+test_threshold_seconds(void)
+{
+    gint64 seconds = 0;
+    GError *error = NULL;
+
+    g_assert_true(nm_threshold_seconds("--soon", 10, &seconds, &error));
+    g_assert_no_error(error);
+    g_assert_cmpint(seconds, ==, 600);
+
+    g_assert_false(nm_threshold_seconds("--soon", 0, &seconds, &error));
+    g_assert_nonnull(error);
+    g_assert_nonnull(strstr(error->message, "--soon"));
+    g_clear_error(&error);
+
+    g_assert_false(nm_threshold_seconds("--ending", -1, &seconds, &error));
+    g_assert_nonnull(error);
+    g_assert_nonnull(strstr(error->message, "--ending"));
+    g_clear_error(&error);
+}
+
+/**
+ * With no --fmt key set at all (NULL, or a freshly nm_formats_init()'d
+ * value), rendering is byte-identical to the plain, untagged output.
+ */
+static void
+test_format_stays_plain_without_fmt(void)
+{
+    NextMeeting nm;
+    nm_init(&nm, NOW);
+
+    nm_consider(&nm, FALSE, NOW + MINUTES(30), NOW + HOURS(1), KEY_LOW);
+
+    NmFormats fmt;
+    nm_formats_init(&fmt);
+
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, &fmt);
+    g_assert_cmpstr(out, ==, " 00:30");
+
+    nm_formats_clear(&fmt);
+    nm_clear(&nm);
+}
+
+/**
+ * Once any --fmt key is set, a start line at or beyond the --soon threshold
+ * uses the "start" tag, and an end line at or beyond the --ending threshold
+ * uses the "end" tag.
+ */
+static void
+test_format_applies_start_and_end_tags(void)
+{
+    NextMeeting nm;
+    nm_init(&nm, NOW);
+
+    /* 30 minutes to start, 40 minutes left to run: both at/above the 10
+     * minute defaults, so neither counts as "soon"/"ending". */
+    nm_consider(&nm, FALSE, NOW + MINUTES(30), NOW + MINUTES(70), KEY_LOW);
+    nm_consider(&nm, FALSE, NOW - MINUTES(20), NOW + MINUTES(40), KEY_HIGH);
+
+    NmFormats fmt;
+    nm_formats_init(&fmt);
+    fmt.start = g_strdup("#[fg=blue]");
+    fmt.end = g_strdup("#[fg=green]");
+
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, &fmt);
+    g_assert_cmpstr(out, ==, "#[fg=blue] 00:30\n#[fg=green]-00:40");
+
+    nm_formats_clear(&fmt);
+    nm_clear(&nm);
+}
+
+/**
+ * A start within --soon minutes uses "soon" instead of "start", and an end
+ * within --ending minutes uses "ending" instead of "end". The two
+ * thresholds are independent: changing --soon does not affect the --ending
+ * boundary or vice versa.
+ */
+static void
+test_format_applies_soon_and_ending_tags(void)
+{
+    NextMeeting nm;
+    nm_init(&nm, NOW);
+
+    /* 5 minutes to start (soon), 3 minutes left to run (ending). */
+    nm_consider(&nm, FALSE, NOW + MINUTES(5), NOW + MINUTES(45), KEY_LOW);
+    nm_consider(&nm, FALSE, NOW - MINUTES(57), NOW + MINUTES(3), KEY_HIGH);
+
+    NmFormats fmt;
+    nm_formats_init(&fmt);
+    fmt.start = g_strdup("#[fg=blue]");
+    fmt.soon = g_strdup("#[fg=yellow,bold]");
+    fmt.end = g_strdup("#[fg=green]");
+    fmt.ending = g_strdup("#[fg=red,bold]");
+
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, &fmt);
+    g_assert_cmpstr(out, ==,
+                    "#[fg=red,bold]-00:03\n#[fg=yellow,bold] 00:05");
+
+    nm_formats_clear(&fmt);
+    nm_clear(&nm);
+}
+
+/**
+ * The --soon/--ending boundary is exclusive on the "soon"/"ending" side: a
+ * remaining time exactly equal to the threshold still counts as
+ * "start"/"end", and one second less already counts as "soon"/"ending".
+ */
+static void
+test_soon_and_ending_boundary(void)
+{
+    NextMeeting nm;
+    nm_init(&nm, NOW);
+
+    /* Exactly 10 minutes to start: not yet "soon" at the default threshold. */
+    nm_consider(&nm, FALSE, NOW + MINUTES(10), NOW + MINUTES(70), KEY_LOW);
+
+    NmFormats fmt;
+    nm_formats_init(&fmt);
+    fmt.start = g_strdup("#[fg=blue]");
+    fmt.soon = g_strdup("#[fg=yellow]");
+
+    g_autofree gchar *at_threshold = nm_format(&nm, NM_DEFAULT_LINES, &fmt);
+    g_assert_cmpstr(at_threshold, ==, "#[fg=blue] 00:10");
+
+    nm_clear(&nm);
+    nm_init(&nm, NOW);
+
+    /* One second under 10 minutes: now "soon". */
+    nm_consider(&nm, FALSE, NOW + MINUTES(10) - 1, NOW + MINUTES(70),
+               KEY_LOW);
+
+    g_autofree gchar *under_threshold =
+        nm_format(&nm, NM_DEFAULT_LINES, &fmt);
+    g_assert_cmpstr(under_threshold, ==, "#[fg=yellow] 00:09");
+
+    nm_formats_clear(&fmt);
+    nm_clear(&nm);
+}
+
+/**
+ * Once any --fmt key is set, a line whose own key was never set renders
+ * with the plain #NM_DEFAULT_TAG - it never borrows another key's tag, even
+ * a closely related one such as "start" for an unset "soon".
+ */
+static void
+test_format_unset_key_falls_back_to_default_tag(void)
+{
+    NextMeeting nm;
+    nm_init(&nm, NOW);
+
+    /* Within the "soon" window, but only "start" is configured. */
+    nm_consider(&nm, FALSE, NOW + MINUTES(1), NOW + MINUTES(30), KEY_LOW);
+
+    NmFormats fmt;
+    nm_formats_init(&fmt);
+    fmt.start = g_strdup("#[fg=blue]");
+
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, &fmt);
+    g_assert_cmpstr(out, ==, NM_DEFAULT_TAG " 00:01");
+
+    nm_formats_clear(&fmt);
+    nm_clear(&nm);
+}
+
+/**
+ * With no meetings left, the "----" marker gets the "none" tag if set, or
+ * #NM_DEFAULT_TAG if any other --fmt key was set but not "none".
+ */
+static void
+test_format_none_tag(void)
+{
+    NextMeeting nm;
+    nm_init(&nm, NOW);
+
+    NmFormats fmt;
+    nm_formats_init(&fmt);
+    fmt.none = g_strdup("#[fg=green]");
+
+    g_autofree gchar *out = nm_format(&nm, NM_DEFAULT_LINES, &fmt);
+    g_assert_cmpstr(out, ==, "#[fg=green]----");
+
+    nm_formats_clear(&fmt);
+    nm_formats_init(&fmt);
+    fmt.start = g_strdup("#[fg=blue]");
+
+    g_autofree gchar *fallback = nm_format(&nm, NM_DEFAULT_LINES, &fmt);
+    g_assert_cmpstr(fallback, ==, NM_DEFAULT_TAG "----");
+
+    nm_formats_clear(&fmt);
+    nm_clear(&nm);
+}
+
+/**
+ * --before/--after text is never tagged, even with --fmt active: only the
+ * countdown lines nm_format() itself renders get a leading tag.
+ */
+static void
+test_decorate_does_not_tag_before_after(void)
+{
+    NextMeeting nm;
+    nm_init(&nm, NOW);
+
+    nm_consider(&nm, FALSE, NOW + MINUTES(30), NOW + HOURS(1), KEY_LOW);
+
+    NmFormats fmt;
+    nm_formats_init(&fmt);
+    fmt.start = g_strdup("#[fg=blue]");
+
+    g_autofree gchar *out =
+        nm_decorate(&nm, NM_DEFAULT_LINES, "Next: ", " to go", &fmt);
+    g_assert_cmpstr(out, ==, "Next: #[fg=blue] 00:30 to go");
+
+    nm_formats_clear(&fmt);
+    nm_clear(&nm);
+}
+
+
 static void
 test_help_summary(void)
 {
@@ -839,6 +1192,27 @@ main(int argc, char *argv[])
     g_test_add_func("/next-meeting/decorate-one-side", test_decorate_one_side);
     g_test_add_func("/next-meeting/decorate-wraps-whole-block",
                     test_decorate_wraps_whole_block);
+    g_test_add_func("/next-meeting/validates-format-values",
+                    test_validates_format_values);
+    g_test_add_func("/next-meeting/formats-is-empty", test_formats_is_empty);
+    g_test_add_func("/next-meeting/apply-fmt-sets-multiple-keys",
+                    test_apply_fmt_sets_multiple_keys);
+    g_test_add_func("/next-meeting/apply-fmt-rejects-bad-specs",
+                    test_apply_fmt_rejects_bad_specs);
+    g_test_add_func("/next-meeting/threshold-seconds", test_threshold_seconds);
+    g_test_add_func("/next-meeting/format-stays-plain-without-fmt",
+                    test_format_stays_plain_without_fmt);
+    g_test_add_func("/next-meeting/format-start-and-end-tags",
+                    test_format_applies_start_and_end_tags);
+    g_test_add_func("/next-meeting/format-soon-and-ending-tags",
+                    test_format_applies_soon_and_ending_tags);
+    g_test_add_func("/next-meeting/soon-and-ending-boundary",
+                    test_soon_and_ending_boundary);
+    g_test_add_func("/next-meeting/format-unset-key-falls-back-to-default",
+                    test_format_unset_key_falls_back_to_default_tag);
+    g_test_add_func("/next-meeting/format-none-tag", test_format_none_tag);
+    g_test_add_func("/next-meeting/decorate-does-not-tag-before-after",
+                    test_decorate_does_not_tag_before_after);
     g_test_add_func("/next-meeting/help-summary", test_help_summary);
     g_test_add_func("/next-meeting/help-summary-without-version",
                     test_help_summary_without_version);

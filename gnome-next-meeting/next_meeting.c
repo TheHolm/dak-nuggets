@@ -1,6 +1,9 @@
 #include "next_meeting.h"
 
 #include <stdio.h>
+#include <string.h>
+
+G_DEFINE_QUARK(nm-error, nm_error)
 
 /*
  * Field separator mixed into nm_key() between the UID, the recurrence
@@ -37,6 +40,165 @@ nm_clear(NextMeeting *nm)
         g_array_free(nm->events, TRUE);
         nm->events = NULL;
     }
+}
+
+void
+nm_formats_init(NmFormats *fmt)
+{
+    fmt->start = NULL;
+    fmt->soon = NULL;
+    fmt->end = NULL;
+    fmt->ending = NULL;
+    fmt->none = NULL;
+    fmt->soon_seconds = (gint64)NM_DEFAULT_SOON_MINUTES * 60;
+    fmt->ending_seconds = (gint64)NM_DEFAULT_ENDING_MINUTES * 60;
+}
+
+void
+nm_formats_clear(NmFormats *fmt)
+{
+    g_free(fmt->start);
+    g_free(fmt->soon);
+    g_free(fmt->end);
+    g_free(fmt->ending);
+    g_free(fmt->none);
+
+    fmt->start = NULL;
+    fmt->soon = NULL;
+    fmt->end = NULL;
+    fmt->ending = NULL;
+    fmt->none = NULL;
+}
+
+gboolean
+nm_formats_is_empty(const NmFormats *fmt)
+{
+    return fmt == NULL ||
+           (fmt->start == NULL && fmt->soon == NULL && fmt->end == NULL &&
+            fmt->ending == NULL && fmt->none == NULL);
+}
+
+gboolean
+nm_is_valid_format_value(const char *value)
+{
+    if (value == NULL) {
+        return FALSE;
+    }
+
+    const char *p = value;
+
+    while (*p != '\0') {
+        if (*p != '#') {
+            return FALSE;
+        }
+
+        p++;
+
+        if (*p != '[') {
+            return FALSE;
+        }
+
+        p++;
+
+        gboolean closed = FALSE;
+
+        while (*p != '\0') {
+            if (*p == ']') {
+                closed = TRUE;
+                p++;
+                break;
+            }
+
+            /*
+             * ASCII control characters (including newline) are never valid
+             * inside a tag; UTF-8 continuation/lead bytes are all >= 0x80
+             * and so never match this check.
+             */
+            if ((guchar)*p < 0x20 || (guchar)*p == 0x7f) {
+                return FALSE;
+            }
+
+            p++;
+        }
+
+        if (!closed) {
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+/*
+ * Points *target at a copy of tags, freeing whatever it pointed at before.
+ * Used by nm_apply_fmt() once per key named in a KEYS=TAGS argument.
+ */
+static void
+nm_set_tag(gchar **target, const char *tags)
+{
+    g_free(*target);
+    *target = g_strdup(tags);
+}
+
+gboolean
+nm_apply_fmt(NmFormats *fmt, const char *spec, GError **error)
+{
+    const char *eq = strchr(spec, '=');
+
+    if (eq == NULL || eq == spec) {
+        g_set_error(error, NM_ERROR, NM_ERROR_BAD_ARGUMENT,
+                    "--fmt: expected KEYS=TAGS, got '%s'", spec);
+        return FALSE;
+    }
+
+    const char *tags = eq + 1;
+
+    if (!nm_is_valid_format_value(tags)) {
+        g_set_error(error, NM_ERROR, NM_ERROR_BAD_ARGUMENT,
+                    "--fmt: value must be made only of #[...] tags: '%s'",
+                    tags);
+        return FALSE;
+    }
+
+    g_autofree gchar *keys_part = g_strndup(spec, (gsize)(eq - spec));
+    g_auto(GStrv) keys = g_strsplit(keys_part, ",", -1);
+
+    for (gsize i = 0; keys[i] != NULL; i++) {
+        if (g_strcmp0(keys[i], "start") == 0) {
+            nm_set_tag(&fmt->start, tags);
+        } else if (g_strcmp0(keys[i], "soon") == 0) {
+            nm_set_tag(&fmt->soon, tags);
+        } else if (g_strcmp0(keys[i], "end") == 0) {
+            nm_set_tag(&fmt->end, tags);
+        } else if (g_strcmp0(keys[i], "ending") == 0) {
+            nm_set_tag(&fmt->ending, tags);
+        } else if (g_strcmp0(keys[i], "none") == 0) {
+            nm_set_tag(&fmt->none, tags);
+        } else {
+            g_set_error(error, NM_ERROR, NM_ERROR_BAD_ARGUMENT,
+                        "--fmt: unknown key '%s'", keys[i]);
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+gboolean
+nm_threshold_seconds(const char *flag,
+                     gint minutes,
+                     gint64 *out_seconds,
+                     GError **error)
+{
+    if (minutes < 1) {
+        g_set_error(error, NM_ERROR, NM_ERROR_BAD_ARGUMENT,
+                    "%s must be at least 1", flag);
+        return FALSE;
+    }
+
+    *out_seconds = (gint64)minutes * 60;
+
+    return TRUE;
 }
 
 /*
@@ -181,13 +343,18 @@ nm_sort(NextMeeting *nm)
 }
 
 /*
- * Renders one event as the six-character countdown line it occupies.
+ * Renders one event as the six-character countdown line it occupies,
+ * optionally preceded by the DAK tag fmt selects for it.
  */
 static gchar *
-nm_format_event(const NextMeeting *nm, const NmEvent *event)
+nm_format_event(const NextMeeting *nm, const NmEvent *event,
+                const NmFormats *fmt)
 {
     /*
-     * Calculate remaining time, truncating seconds.
+     * Calculate remaining time, truncating seconds. The un-clamped value is
+     * also what a --soon/--ending threshold is measured against, so an
+     * absurdly distant event compares correctly even once its displayed
+     * digits are clamped below.
      */
     time_t remaining = event->when - nm->now;
 
@@ -213,17 +380,45 @@ nm_format_event(const NextMeeting *nm, const NmEvent *event)
      */
     char marker = event->kind == NM_EVENT_END ? '-' : ' ';
 
-    return g_strdup_printf("%c%02ld:%02ld", marker, hours, minutes);
+    gchar *body = g_strdup_printf("%c%02ld:%02ld", marker, hours, minutes);
+
+    if (nm_formats_is_empty(fmt)) {
+        return body;
+    }
+
+    /*
+     * Each line picks its own key - never a fallback to another key - so a
+     * key left unset by the caller renders as NM_DEFAULT_TAG regardless of
+     * what any other key was set to.
+     */
+    const gchar *tag;
+
+    if (event->kind == NM_EVENT_END) {
+        tag = remaining < fmt->ending_seconds ? fmt->ending : fmt->end;
+    } else {
+        tag = remaining < fmt->soon_seconds ? fmt->soon : fmt->start;
+    }
+
+    gchar *tagged = g_strconcat(tag != NULL ? tag : NM_DEFAULT_TAG, body, NULL);
+
+    g_free(body);
+
+    return tagged;
 }
 
 gchar *
-nm_format(NextMeeting *nm, guint max_lines)
+nm_format(NextMeeting *nm, guint max_lines, const NmFormats *fmt)
 {
     /*
      * Nothing left to count down to.
      */
     if (nm->events->len == 0) {
-        return g_strdup("----");
+        if (nm_formats_is_empty(fmt)) {
+            return g_strdup("----");
+        }
+
+        return g_strconcat(fmt->none != NULL ? fmt->none : NM_DEFAULT_TAG,
+                           "----", NULL);
     }
 
     if (max_lines < 1) {
@@ -243,7 +438,7 @@ nm_format(NextMeeting *nm, guint max_lines)
             g_string_append_c(out, '\n');
         }
 
-        gchar *line = nm_format_event(nm, event);
+        gchar *line = nm_format_event(nm, event, fmt);
 
         g_string_append(out, line);
 
@@ -299,10 +494,11 @@ gchar *
 nm_decorate(NextMeeting *nm,
             guint max_lines,
             const char *before,
-            const char *after)
+            const char *after,
+            const NmFormats *fmt)
 {
     gchar *prefix = nm_expand_escapes(before);
-    gchar *body = nm_format(nm, max_lines);
+    gchar *body = nm_format(nm, max_lines, fmt);
     gchar *suffix = nm_expand_escapes(after);
 
     gchar *out =
