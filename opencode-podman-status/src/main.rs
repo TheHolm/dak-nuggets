@@ -73,6 +73,9 @@ enum Mode {
     Counts,
     /// Detail for one container, identified by slot number or name.
     Instance(String),
+    /// The window-title plugin's prefix for one container, identified by slot
+    /// number or name, for raising that window with the desktop's own tools.
+    Title(String),
     /// Human-readable diagnostic table.
     List,
     /// Probe one process's namespaces directly, bypassing podman discovery.
@@ -162,6 +165,11 @@ Options:
   --instance <slot|name>  Detail for one container: name, state (run, wait,
                           done, or Error), time in state. Prints nothing at
                           all if that slot does not exist.
+  --title <slot|name>     Print the window-title plugin's prefix for one
+                          container, \"OpenCode (<hostname>)\", with no trailing
+                          newline - for focusing that window with the desktop's
+                          own tools. Prints nothing at all if that slot does
+                          not exist. See README.markdown.
   --list                  Diagnostic table of every container (not for DAK).
   --pid <n>               Diagnostic: probe this process's namespaces directly,
                           bypassing podman, and print the raw JSON report.
@@ -230,6 +238,10 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             "--instance" => {
                 let v = value(args, &mut index, "--instance")?.to_string();
                 options.mode = Mode::Instance(v);
+            }
+            "--title" => {
+                let v = value(args, &mut index, "--title")?.to_string();
+                options.mode = Mode::Title(v);
             }
             "--list" => options.mode = Mode::List,
             "--pid" => {
@@ -523,23 +535,51 @@ where
         .collect()
 }
 
-/// Finds the container a `--instance` argument refers to.
+/// Finds the index of the container a `--instance` or `--title` argument refers
+/// to.
 ///
 /// Accepts a slot number, a full container name, or the shortened name as
 /// displayed. Returns `None` if nothing matches, which the caller renders as no
 /// output at all.
+fn select_index<'a>(
+    containers: impl Iterator<Item = &'a Container>,
+    wanted: &str,
+) -> Option<usize> {
+    let containers: Vec<&Container> = containers.collect();
+    if let Ok(slot) = wanted.parse::<usize>() {
+        return containers.iter().position(|c| c.slot == slot);
+    }
+    containers
+        .iter()
+        .position(|c| c.name == wanted)
+        .or_else(|| {
+            containers
+                .iter()
+                .position(|c| render::short_name(&c.name) == wanted)
+        })
+}
+
+/// Finds the container a `--instance` argument refers to, with its report.
 fn select_instance<'a>(
     results: &'a [(Container, Report)],
     wanted: &str,
 ) -> Option<&'a (Container, Report)> {
-    if let Ok(slot) = wanted.parse::<usize>() {
-        return results.iter().find(|(c, _)| c.slot == slot);
+    select_index(results.iter().map(|(c, _)| c), wanted).map(|index| &results[index])
+}
+
+/// The string the window-title plugin puts in front of an opencode container's
+/// window title, which is what `--title` prints.
+///
+/// The plugin writes `OpenCode (<host>)` on the home screen and
+/// `OpenCode (<host>) | <session title>` in a session, so this prefix matches
+/// both via the GNOME extension's `activateByPrefix` and a KDE prefix match.
+/// With no hostname at all the plugin writes bare `OpenCode`, mirrored here.
+fn window_title(host: &str) -> String {
+    if host.is_empty() {
+        "OpenCode".to_string()
+    } else {
+        format!("OpenCode ({host})")
     }
-    results.iter().find(|(c, _)| c.name == wanted).or_else(|| {
-        results
-            .iter()
-            .find(|(c, _)| render::short_name(&c.name) == wanted)
-    })
 }
 
 /// Renders the diagnostic table.
@@ -655,6 +695,28 @@ fn run_with(options: Options, podman: &[&str]) -> Result<Printed, String> {
             Ok(Printed::plain(stdout))
         }
 
+        Mode::Title(wanted) => {
+            let containers = match discover() {
+                Ok(containers) => containers,
+                // No title makes sense while podman is stuck, so this prints
+                // nothing - success, like the summary's placeholders - rather
+                // than an error DAK would draw on the button.
+                Err(e) => return or_placeholder(e, String::new()),
+            };
+            let host = match select_index(containers.iter(), wanted) {
+                // A slot that does not exist prints nothing, like --instance.
+                None => return Ok(Printed::plain(String::new())),
+                Some(index) => {
+                    let name = &containers[index].name;
+                    match discover::hostname(podman, name, discovery_deadline(run_deadline)) {
+                        Ok(host) => host,
+                        Err(e) => return or_placeholder(e, String::new()),
+                    }
+                }
+            };
+            Ok(Printed::plain(window_title(&host)))
+        }
+
         Mode::List => {
             let containers = discover().map_err(|e| e.to_string())?;
             let results = probe_all(&containers, &options, run_deadline);
@@ -750,6 +812,31 @@ mod tests {
             Mode::Instance(v) => assert_eq!(v, "opencode-web"),
             other => panic!("expected instance mode, got {other:?}"),
         }
+    }
+
+    /// `--title` captures its argument, a slot or a name.
+    #[test]
+    fn parses_title_mode() {
+        match parse_args(&args(&["--title", "2"])).unwrap().mode {
+            Mode::Title(v) => assert_eq!(v, "2"),
+            other => panic!("expected title mode, got {other:?}"),
+        }
+        match parse_args(&args(&["--title", "opencode-web"]))
+            .unwrap()
+            .mode
+        {
+            Mode::Title(v) => assert_eq!(v, "opencode-web"),
+            other => panic!("expected title mode, got {other:?}"),
+        }
+        assert!(parse_args(&args(&["--title"])).is_err());
+    }
+
+    /// `--title` prints exactly what the window-title plugin puts in front of a
+    /// container's window title, and bare `OpenCode` for an empty hostname.
+    #[test]
+    fn composes_the_window_title() {
+        assert_eq!(window_title("opencode-web"), "OpenCode (opencode-web)");
+        assert_eq!(window_title(""), "OpenCode");
     }
 
     /// The remaining modes parse.
@@ -1308,7 +1395,12 @@ mod tests {
     #[test]
     fn failing_podman_is_still_an_error() {
         let fake = FakePodman::new("echo 'Error: broken' >&2; exit 125");
-        for m in [Mode::Counts, Mode::Instance("1".into()), Mode::List] {
+        for m in [
+            Mode::Counts,
+            Mode::Instance("1".into()),
+            Mode::Title("1".into()),
+            Mode::List,
+        ] {
             let e = run_with(mode(m), &fake.cmd()).unwrap_err();
             assert!(e.contains("broken"), "{e}");
         }
@@ -1373,5 +1465,60 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert!(lines[0].starts_with("#[default]"), "{lines:?}");
         assert!(lines[2].starts_with("#[default]"), "{lines:?}");
+    }
+
+    /// End to end: `--title` prints the plugin's prefix, resolved from the
+    /// container's `HOSTNAME` environment variable when it is set, with no
+    /// trailing newline.
+    #[test]
+    fn title_uses_the_container_hostname() {
+        let fake = FakePodman::new(
+            r#"case "$1" in
+ps) echo '[{"Id":"abc","Names":["opencode-web"],"Created":1,"Pid":1}]' ;;
+inspect) echo '"syshost" ["HOSTNAME=envhost","PATH=/bin"]' ;;
+esac"#,
+        );
+        let out = run_with(mode(Mode::Title("1".into())), &fake.cmd()).unwrap();
+        assert_eq!(out, Printed::plain("OpenCode (envhost)".to_string()));
+    }
+
+    /// Without a `HOSTNAME` in the container's environment, `--title` falls back
+    /// to its system hostname, like the plugin, and a name selects the container
+    /// just as `--instance` does.
+    #[test]
+    fn title_falls_back_to_the_system_hostname() {
+        let fake = FakePodman::new(
+            r#"case "$1" in
+ps) echo '[{"Id":"abc","Names":["opencode-web"],"Created":1,"Pid":1}]' ;;
+inspect) echo '"syshost" ["PATH=/bin"]' ;;
+esac"#,
+        );
+        let out = run_with(mode(Mode::Title("opencode-web".into())), &fake.cmd()).unwrap();
+        assert_eq!(out.stdout, "OpenCode (syshost)");
+        assert_eq!(out.note, None);
+    }
+
+    /// A slot that does not exist prints nothing at all, so an unused button
+    /// focuses nothing - and the container is never inspected.
+    #[test]
+    fn title_of_an_unknown_slot_is_empty() {
+        let fake = FakePodman::new(
+            r#"case "$1" in
+ps) echo '[{"Id":"abc","Names":["opencode-web"],"Created":1,"Pid":1}]' ;;
+inspect) echo 'should not be called' >&2; exit 1 ;;
+esac"#,
+        );
+        let out = run_with(mode(Mode::Title("9".into())), &fake.cmd()).unwrap();
+        assert_eq!(out, Printed::plain(String::new()));
+    }
+
+    /// While podman is stuck, `--title` prints nothing and succeeds, like the
+    /// other DAK-facing modes.
+    #[test]
+    fn stuck_podman_gives_no_title() {
+        let fake = FakePodman::new("sleep 30");
+        let out = run_with(mode(Mode::Title("1".into())), &fake.cmd()).unwrap();
+        assert_eq!(out.stdout, "");
+        assert!(out.note.unwrap().contains("did not answer in time"));
     }
 }

@@ -803,6 +803,15 @@ Design decisions and why:
   With no `--hostname`, podman gives the short container ID, which is what a
   bare `opencode` in these containers shows anyway.
 
+`--title` (in the Rust binary, shipped in the same 0.4.0) prints this plugin's
+prefix, so a desktop shortcut can raise a container's window with the desktop's
+own tools (README, "Bringing a window into focus"). It resolves the host itself
+with one `podman inspect --format '{{json .Config.Hostname}} {{json
+.Config.Env}}'` and repeats this plugin's precedence - env `HOSTNAME`, trimmed
+and only when non-empty, then the system hostname. **The two resolvers must stay
+in step**: if they drift, `--title` prints a string that matches no window. The
+Rust side is `discover::resolve_host`; the plugin side is `resolveHost`.
+
 Code shape follows §6a's pattern: logic sits in pure helpers (`resolveHost`,
 `composeTitle`, `truncateTitle`, `evaluate`) and a `start()` that takes
 injectable interval functions, with the TUI entry point a thin wrapper.

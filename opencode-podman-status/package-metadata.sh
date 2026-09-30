@@ -40,7 +40,9 @@ container's hostname into the terminal window title (OpenCode (<hostname>) on
 the home screen and OpenCode (<hostname>) | <session title> in a session), so
 instances in different containers can be told apart. Enable it independently
 by listing its path in tui.json. It is TUI-only and does nothing under
-opencode serve, web or the desktop app.
+opencode serve, web or the desktop app. The binary's --title option prints
+that same prefix for one container, so a desktop shortcut can raise its
+window.
 
 The container's loopback address is unreachable from the host. For each
 container, a short-lived child therefore joins the container's namespaces only

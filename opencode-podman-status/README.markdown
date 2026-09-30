@@ -207,6 +207,47 @@ Notes:
   program reports state over HTTP rather than through titles
   ([NOTES.md](NOTES.md) §7).
 
+### Bringing a window into focus
+
+`--title <slot|name>` prints the prefix the plugin puts on a container's window
+(`OpenCode (<hostname>)`, with no trailing newline), so a desktop shortcut can
+find that window and raise it. It resolves the hostname the same way the plugin
+does - the container's `HOSTNAME` if set, otherwise its system hostname - so the
+string it prints matches the window.
+
+On **GNOME Shell**, with the [Activate Window By
+Title](https://extensions.gnome.org/extension/5021/activate-window-by-title/)
+extension installed and enabled:
+
+```sh
+# Raise container slot 2's window.
+gdbus call --session \
+  --dest org.gnome.Shell \
+  --object-path /de/lucaswerkmeister/ActivateWindowByTitle \
+  --method de.lucaswerkmeister.ActivateWindowByTitle.activateByPrefix \
+  "$(opencode-podman-status --title 2)"
+```
+
+`activateByPrefix` matches both the home-screen title and the
+`OpenCode (<hostname>) | <session title>` form, and prints `false` if no window
+matches. Run it from the graphical session: `gdbus` needs
+`DBUS_SESSION_BUS_ADDRESS`, so a system service will not reach the session bus.
+`busctl --user call …` is equivalent if `gdbus` is not installed.
+
+On **KDE Plasma**, KWin exposes no activate-by-title D-Bus call, so use
+[`kdotool`](https://github.com/jinliu/kdotool) (0.3.0 or later), which runs a
+small KWin script. `kdotool search --name` treats its argument as a regular
+expression, so this matches with `startsWith` instead and needs no escaping:
+
+```sh
+# Raise container slot 2's window.
+kdotool kwinscript --inline "var t = workspace.windowList(); for (var i = 0; i < t.length; i++) { var w = t[i]; if (w.caption.startsWith('$(opencode-podman-status --title 2)')) { workspace.activeWindow = w; break; } }"
+```
+
+`kdotool` is not part of Plasma (install it from the AUR or build it from
+source), and `xdotool` and `wmctrl` do not work on Plasma Wayland. Re-run with
+`kdotool --debug` if nothing is raised.
+
 ## Usage
 
 ```
@@ -215,6 +256,10 @@ opencode-podman-status [options]
   --instance <slot|name>  Detail for one container: name, state (run, wait,
                           done, or Error), time in state. Prints nothing at
                           all if that slot does not exist.
+  --title <slot|name>     Print the window-title plugin's prefix for one
+                          container, OpenCode (<hostname>), with no trailing
+                          newline. Prints nothing at all if that slot does not
+                          exist. See "Bringing a window into focus" above.
   --list                  Diagnostic table of every container (not for DAK).
   --pid <n>               Diagnostic: probe this process's namespaces directly,
                           bypassing podman, and print the raw JSON report.

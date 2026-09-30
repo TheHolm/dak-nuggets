@@ -11,6 +11,12 @@
   is `HOSTNAME` from the environment when set, otherwise the system hostname,
   so `--hostname <name>` (or `-e HOSTNAME=<name>`) gives a friendly one.
   TUI-only: it does nothing under `opencode serve`, `web` or the desktop app.
+- **New: `--title <slot|name>`.** Prints the string the window-title plugin puts
+  on a container's window (`OpenCode (<hostname>)`) and nothing else, with no
+  trailing newline, so a desktop shortcut can raise that window. The README's
+  [Bringing a window into focus](README.markdown#bringing-a-window-into-focus)
+  gives a one-line `gdbus` call for GNOME Shell (with the "Activate Window By
+  Title" extension) and a one-line `kdotool` call for KDE Plasma.
 
 Details:
 
@@ -31,6 +37,14 @@ Details:
 - The status plugin is unchanged apart from its reported `VERSION`, which
   follows `Cargo.toml` (now 0.4.0). Its routes, auth and tracked state are
   untouched, and the two plugins load from different config files.
+- `--title` reuses `--instance`'s slot/name matching (slot number, full name, or
+  shortened name), then runs one `podman inspect --format '{{json
+  .Config.Hostname}} {{json .Config.Env}}'` and applies the plugin's own
+  precedence: `HOSTNAME` from the container's environment, trimmed and only when
+  non-empty, otherwise its system hostname. It never probes the container. A
+  slot or name that does not exist, or podman stuck behind a container lock,
+  prints nothing and exits 0 (leaving an unused button blank); any other podman
+  failure is still an error.
 
 ## v0.3.0
 

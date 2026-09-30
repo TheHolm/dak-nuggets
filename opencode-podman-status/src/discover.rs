@@ -376,6 +376,77 @@ pub(crate) fn discover_with(
     Ok(containers)
 }
 
+/// Reads a container's hostname, resolved exactly the way the window-title
+/// plugin resolves it: the `HOSTNAME` environment variable when it is set and
+/// not blank, otherwise the container's system hostname.
+///
+/// `command` is how to run podman - `["podman"]`, or a fake in tests - and the
+/// call obeys the same deadline as discovery. Only used to build the `--title`
+/// string, so `name` is a container that discovery already found.
+pub(crate) fn hostname(
+    command: &[&str],
+    name: &str,
+    deadline: Instant,
+) -> Result<String, DiscoverError> {
+    let format = "{{json .Config.Hostname}} {{json .Config.Env}}";
+    let out = podman(command, &["inspect", "--format", format, name], deadline)?;
+    parse_hostname(&out)
+        .map_err(|e| DiscoverError::Failed(format!("cannot read hostname of {name}: {e}")))
+}
+
+/// Resolves a hostname the way `plugin/opencode-window-title.js` does.
+///
+/// The plugin's `HOSTNAME` takes precedence over the system hostname and is used
+/// only when it is non-empty after trimming; the fallback is trimmed the same
+/// way. Kept character-for-character in step with the plugin so `--title`
+/// prints a string that matches the window the plugin labelled.
+fn resolve_host(hostname: Option<&str>, env: &[String]) -> String {
+    let from_env = env
+        .iter()
+        .find_map(|entry| entry.strip_prefix("HOSTNAME="))
+        .map(str::trim)
+        .filter(|h| !h.is_empty());
+    let system = hostname.map(str::trim).filter(|h| !h.is_empty());
+    from_env.or(system).unwrap_or("").to_string()
+}
+
+/// Parses `podman inspect --format '{{json .Config.Hostname}} {{json .Config.Env}}'`
+/// output and resolves the hostname from it.
+///
+/// `Config.Hostname` is a JSON string (or null) and `Config.Env` a JSON array of
+/// `KEY=value` strings; any other shape, a missing value, or malformed JSON is
+/// an error rather than a silently empty hostname.
+fn parse_hostname(output: &str) -> Result<String, String> {
+    let mut values = serde_json::Deserializer::from_str(output).into_iter::<serde_json::Value>();
+    let hostname = values
+        .next()
+        .transpose()
+        .map_err(|e| format!("invalid hostname JSON: {e}"))?
+        .ok_or_else(|| "inspect output has no hostname".to_string())?;
+    let env = values
+        .next()
+        .transpose()
+        .map_err(|e| format!("invalid environment JSON: {e}"))?
+        .ok_or_else(|| "inspect output has no environment".to_string())?;
+
+    let hostname = match hostname {
+        serde_json::Value::String(s) => Some(s),
+        serde_json::Value::Null => None,
+        other => return Err(format!("unexpected hostname value: {other}")),
+    };
+    let env: Vec<String> = match env {
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| match item {
+                serde_json::Value::String(s) => Some(s),
+                _ => None,
+            })
+            .collect(),
+        other => return Err(format!("unexpected environment value: {other}")),
+    };
+    Ok(resolve_host(hostname.as_deref(), &env))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -809,5 +880,94 @@ esac"#,
         let e = discover_with(&fake.cmd(), Instant::now() + Duration::from_secs(5)).unwrap_err();
         assert!(matches!(e, DiscoverError::Failed(_)), "{e:?}");
         assert!(e.to_string().contains("nope"), "{e}");
+    }
+
+    /// The container's `HOSTNAME` environment variable wins over its system
+    /// hostname, and both are trimmed - the plugin's own precedence.
+    #[test]
+    fn resolve_host_prefers_the_environment() {
+        let env = vec!["PATH=/bin".to_string(), "HOSTNAME=from-env".to_string()];
+        assert_eq!(resolve_host(Some("system"), &env), "from-env");
+        assert_eq!(resolve_host(Some("system"), &[]), "system");
+        assert_eq!(resolve_host(Some(" system "), &[]), "system");
+        assert_eq!(resolve_host(None, &[]), "");
+    }
+
+    /// A blank `HOSTNAME` (or a blank system hostname) falls back rather than
+    /// producing an empty title.
+    #[test]
+    fn resolve_host_ignores_blank_values() {
+        let env = vec!["HOSTNAME=   ".to_string()];
+        assert_eq!(resolve_host(Some("system"), &env), "system");
+        assert_eq!(resolve_host(Some(""), &env), "");
+        assert_eq!(resolve_host(Some("  "), &[]), "");
+        assert_eq!(resolve_host(None, &["HOSTNAME=".to_string()]), "");
+    }
+
+    /// `inspect` output in the shape podman actually prints is parsed into a
+    /// hostname, including the `null` hostname and non-string env entries.
+    #[test]
+    fn parses_inspect_hostname_output() {
+        assert_eq!(
+            parse_hostname(r#""syshost" ["HOSTNAME=envhost","PATH=/bin"]"#).unwrap(),
+            "envhost"
+        );
+        assert_eq!(
+            parse_hostname(r#""syshost" ["PATH=/bin"]"#).unwrap(),
+            "syshost"
+        );
+        assert_eq!(parse_hostname(r#"null ["PATH=/bin"]"#).unwrap(), "");
+        // A second value per line, as podman may wrap, is still parsed.
+        assert_eq!(
+            parse_hostname("\"syshost\" [\n  \"PATH=/bin\"\n]\n").unwrap(),
+            "syshost"
+        );
+        // A non-string env entry is ignored, not fatal: only HOSTNAME matters.
+        assert_eq!(parse_hostname(r#""syshost" ["ok", 5]"#).unwrap(), "syshost");
+    }
+
+    /// Malformed or unexpectedly shaped `inspect` output is an error, not an
+    /// empty hostname.
+    #[test]
+    fn rejects_bad_inspect_hostname_output() {
+        assert!(parse_hostname("").is_err());
+        assert!(parse_hostname(r#""only-hostname""#).is_err());
+        assert!(parse_hostname(r#"42 ["HOSTNAME=a"]"#).is_err());
+        assert!(parse_hostname(r#""h" "not-an-array""#).is_err());
+    }
+
+    /// `hostname` runs exactly one `inspect` with the two JSON fields and
+    /// returns the resolved value.
+    #[test]
+    fn hostname_reads_the_container() {
+        let fake = FakePodman::new(
+            r#"echo "$1 $3" >> $DIR/calls
+echo '"syshost" ["HOSTNAME=envhost"]'"#,
+        );
+        let got = hostname(
+            &fake.cmd(),
+            "opencode-web",
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(got, "envhost");
+        let calls = fake.read("calls");
+        assert!(calls.contains("inspect"), "{calls}");
+        assert!(calls.contains("{{json .Config.Hostname}}"), "{calls}");
+    }
+
+    /// A failing `inspect` is reported with the container it was for.
+    #[test]
+    fn hostname_reports_a_failed_inspect() {
+        let fake = FakePodman::new("echo 'Error: gone' >&2; exit 125");
+        let e = hostname(
+            &fake.cmd(),
+            "opencode-web",
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(matches!(e, DiscoverError::Failed(_)), "{e:?}");
+        let e = e.to_string();
+        assert!(e.contains("opencode-web") && e.contains("gone"), "{e}");
     }
 }

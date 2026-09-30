@@ -20,6 +20,22 @@ parses this structure to build each GitHub Release's body, printing from a
 No releases yet - this file gains its first `## vYYYY.MM.DD` entry when the
 first collection-wide tag is cut.
 
+## v2026.09.30 — opencode-podman-status 0.4.0
+
+### User-facing changes
+- New: `opencode-podman-status` ships an optional window-title plugin that puts
+  each container's hostname into its opencode TUI's terminal/tmux window title
+  (`OpenCode (<hostname>)` on the home screen, `OpenCode (<hostname>) | <session
+  title>` in a session), so containers sharing a desktop can be told apart.
+- New: `--title <slot|name>` prints that same title prefix for one container, so
+  a desktop shortcut can find and raise its window: a one-line `gdbus` call with
+  GNOME's "Activate Window By Title" extension, or a one-line `kdotool` call on
+  KDE Plasma.
+
+### Details
+- See `opencode-podman-status/RELEASE_NOTES.md` (v0.4.0) and `NOTES.md` (§6e).
+- `gnome-next-meeting` is unchanged and re-released at 0.4.0.
+
 ## v2026.09.28-1 — gnome-next-meeting 0.4.0
 
 ### User-facing changes
