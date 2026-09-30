@@ -10,6 +10,11 @@ each container's opencode and to run opencode **without `--port`**. `opencode
 port can use it to skip every human check, and that includes the agent itself,
 from inside its own container. See [Security](#security).
 
+A second, optional **window-title plugin** puts the container's hostname into
+the opencode TUI's terminal window title, so instances in different containers
+can be told apart. It is independent of the status plugin and is enabled
+separately in `tui.json` - see [Window title plugin](#window-title-plugin).
+
 **Linux only.** It works by creating sockets inside rootless podman containers'
 network namespaces, and rootless podman does not exist on FreeBSD. See
 [Platform support](#platform-support).
@@ -146,6 +151,103 @@ What the plugin does:
   instance therefore shows `done` with an unknown age (`--:--`) until something
   happens in it.
 
+## Window title plugin
+
+A second, optional plugin puts the container's hostname into the opencode
+TUI's terminal window title - what a terminal emulator and tmux show in the
+title bar or window list:
+
+| View | Title |
+|---|---|
+| Home screen | `OpenCode (<hostname>)` |
+| Inside a session | `OpenCode (<hostname>) | <session title>` |
+
+opencode itself only ever sets `OpenCode` on the home screen or
+`OC | <session title>` in a session, with no config key for a custom title, so
+without this every container's window looks the same. `<hostname>` is
+`HOSTNAME` from opencode's environment when it is set, otherwise the system
+hostname (`os.hostname()`). In a rootless podman container with no
+`--hostname`, that is the short container ID; pass `--hostname <name>` (or
+`-e HOSTNAME=<name>`) for a friendlier one.
+
+The plugin is installed by the package at:
+
+| Installed by | Location |
+|---|---|
+| `.deb` (Debian, Ubuntu, and the `dak-nuggets` bundle) | `/usr/share/opencode-podman-status/opencode-window-title.js` |
+| `make install` | `$PREFIX/share/opencode-podman-status/opencode-window-title.js` (default `PREFIX=/usr/local`) |
+| FreeBSD `.pkg` | not packaged, since the program is Linux-only |
+
+It is a **TUI plugin**, loaded from `tui.json` rather than `opencode.json`, and
+is independent of the status plugin: enable either, both, or neither. Add its
+path to the `plugin` array of the `tui.json` that opencode reads, for example
+the global `~/.config/opencode/tui.json` inside the container:
+
+```json
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": ["/usr/share/opencode-podman-status/opencode-window-title.js"]
+}
+```
+
+Restart opencode after the change. The title follows the session: it is
+re-applied when you move between the home screen and a session, and when the
+session title changes. The session title is truncated the way opencode
+truncates it (longer than 40 characters becomes the first 37 plus `…`).
+Turning off the command palette's "terminal title" toggle turns this plugin's
+title off too, matching opencode's own behaviour.
+
+Notes:
+
+- **TUI only.** Under `opencode serve`, `opencode web` or the desktop app there
+  is no TUI, so the plugin does nothing.
+- **The title is not a status channel.** Wayland gives no way to read other
+  clients' window titles, tmux may rewrite them, and several containers sharing
+  one terminal collapse to a single title - which is also why the status
+  program reports state over HTTP rather than through titles
+  ([NOTES.md](NOTES.md) §7).
+
+### Bringing a window into focus
+
+`--title <slot|name>` prints the prefix the plugin puts on a container's window
+(`OpenCode (<hostname>)`, with no trailing newline), so a desktop shortcut can
+find that window and raise it. It resolves the hostname the same way the plugin
+does - the container's `HOSTNAME` if set, otherwise its system hostname - so the
+string it prints matches the window.
+
+On **GNOME Shell**, with the [Activate Window By
+Title](https://extensions.gnome.org/extension/5021/activate-window-by-title/)
+extension installed and enabled:
+
+```sh
+# Raise container slot 2's window.
+gdbus call --session \
+  --dest org.gnome.Shell \
+  --object-path /de/lucaswerkmeister/ActivateWindowByTitle \
+  --method de.lucaswerkmeister.ActivateWindowByTitle.activateByPrefix \
+  "$(opencode-podman-status --title 2)"
+```
+
+`activateByPrefix` matches both the home-screen title and the
+`OpenCode (<hostname>) | <session title>` form, and prints `false` if no window
+matches. Run it from the graphical session: `gdbus` needs
+`DBUS_SESSION_BUS_ADDRESS`, so a system service will not reach the session bus.
+`busctl --user call …` is equivalent if `gdbus` is not installed.
+
+On **KDE Plasma**, KWin exposes no activate-by-title D-Bus call, so use
+[`kdotool`](https://github.com/jinliu/kdotool) (0.3.0 or later), which runs a
+small KWin script. `kdotool search --name` treats its argument as a regular
+expression, so this matches with `startsWith` instead and needs no escaping:
+
+```sh
+# Raise container slot 2's window.
+kdotool kwinscript --inline "var t = workspace.windowList(); for (var i = 0; i < t.length; i++) { var w = t[i]; if (w.caption.startsWith('$(opencode-podman-status --title 2)')) { workspace.activeWindow = w; break; } }"
+```
+
+`kdotool` is not part of Plasma (install it from the AUR or build it from
+source), and `xdotool` and `wmctrl` do not work on Plasma Wayland. Re-run with
+`kdotool --debug` if nothing is raised.
+
 ## Usage
 
 ```
@@ -154,6 +256,10 @@ opencode-podman-status [options]
   --instance <slot|name>  Detail for one container: name, state (run, wait,
                           done, or Error), time in state. Prints nothing at
                           all if that slot does not exist.
+  --title <slot|name>     Print the window-title plugin's prefix for one
+                          container, OpenCode (<hostname>), with no trailing
+                          newline. Prints nothing at all if that slot does not
+                          exist. See "Bringing a window into focus" above.
   --list                  Diagnostic table of every container (not for DAK).
   --pid <n>               Diagnostic: probe this process's namespaces directly,
                           bypassing podman, and print the raw JSON report.

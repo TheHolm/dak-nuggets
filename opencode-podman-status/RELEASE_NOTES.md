@@ -1,5 +1,51 @@
 # Release notes — opencode-podman-status
 
+## v0.4.0
+
+- **New: optional window-title plugin.** A second plugin, independent of the
+  status plugin, puts the container's hostname into the opencode TUI's
+  terminal/tmux window title: `OpenCode (<hostname>)` on the home screen and
+  `OpenCode (<hostname>) | <session title>` inside a session. Enable it by
+  listing its path in `tui.json`; the status plugin still goes in
+  `opencode.json`, and either can be enabled without the other. `<hostname>`
+  is `HOSTNAME` from the environment when set, otherwise the system hostname,
+  so `--hostname <name>` (or `-e HOSTNAME=<name>`) gives a friendly one.
+  TUI-only: it does nothing under `opencode serve`, `web` or the desktop app.
+- **New: `--title <slot|name>`.** Prints the string the window-title plugin puts
+  on a container's window (`OpenCode (<hostname>)`) and nothing else, with no
+  trailing newline, so a desktop shortcut can raise that window. The README's
+  [Bringing a window into focus](README.markdown#bringing-a-window-into-focus)
+  gives a one-line `gdbus` call for GNOME Shell (with the "Activate Window By
+  Title" extension) and a one-line `kdotool` call for KDE Plasma.
+
+Details:
+
+- The plugin is `plugin/opencode-window-title.js`, installed next to the status
+  plugin at `/usr/share/opencode-podman-status/opencode-window-title.js` by the
+  `.deb`, and under `$PREFIX/share/opencode-podman-status/` by `make install`.
+- opencode sets the window title itself (`OpenCode`, or `OC | <session title>`
+  in a session) and has no config key for a custom one, so the plugin re-applies
+  its own through the TUI plugin API's `renderer.setTerminalTitle`. It polls
+  `route.current`/`state.session` once a second and unconditionally reasserts
+  its title on every tick, rather than only when something looked different:
+  core's own title effect always runs once on mount, which can land after the
+  plugin's first write and clobber it even with no further route or session
+  change to detect. The session title is truncated the way core truncates it
+  (> 40 characters becomes the first 37 plus `…`). Turning off the command
+  palette's "terminal title" toggle clears the title, as core would. See
+  `NOTES.md` §6e.
+- The status plugin is unchanged apart from its reported `VERSION`, which
+  follows `Cargo.toml` (now 0.4.0). Its routes, auth and tracked state are
+  untouched, and the two plugins load from different config files.
+- `--title` reuses `--instance`'s slot/name matching (slot number, full name, or
+  shortened name), then runs one `podman inspect --format '{{json
+  .Config.Hostname}} {{json .Config.Env}}'` and applies the plugin's own
+  precedence: `HOSTNAME` from the container's environment, trimmed and only when
+  non-empty, otherwise its system hostname. It never probes the container. A
+  slot or name that does not exist, or podman stuck behind a container lock,
+  prints nothing and exits 0 (leaving an unused button blank); any other podman
+  failure is still an error.
+
 ## v0.3.0
 
 - **New: colour buttons with DAK's tmux-style tags.** DAK (>= 0.13, `markup`

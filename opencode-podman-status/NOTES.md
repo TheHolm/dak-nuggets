@@ -726,6 +726,116 @@ killed, a detached process holding the pipes, `ps` with/without `Pid`, and
 way (placeholders, exit status, the error cases), and `probe_all_with` with
 injected probes (order, a hung probe, a panicking probe).
 
+## 6e. The window-title plugin (0.4.0)
+
+`plugin/opencode-window-title.js` is a **TUI plugin** (not a server plugin like
+§6a), enabled from `tui.json`. It exists to make windows distinguishable:
+opencode labels every instance `OpenCode` / `OC | <session title>`, so with
+several containers open there is no way to tell which window is which.
+
+How opencode manages the title, from the 1.18.33 binary:
+
+- One core `createEffect` calls `renderer.setTerminalTitle` with `"OpenCode"`
+  on the home route, `OC | <session title>` on a session route and
+  `OC | <plugin id>` on the plugin route. `OPENCODE_DISABLE_TERMINAL_TITLE`
+  disables it outright; the command palette's "terminal title" toggle
+  (`terminal.title.toggle`) flips the live signal and persists KV
+  `terminal_title_enabled`. There is **no config key** for a custom title.
+- `CliRenderer.setTerminalTitle` writes OSC 0 (`\x1b]0;<title>\x07`), which is
+  what tmux's `set-titles` and terminal emulators use. Verified by capturing a
+  TUI in a pty.
+
+The TUI plugin API (`@opencode-ai/plugin/tui`, `TuiPluginApi`) is the escape
+hatch. Confirmed present at runtime on 1.18.33 (a spike wrote the API's own key
+list to a file from inside the TUI):
+
+```
+keys: app attention command keys keymap mode route ui tuiConfig kv state theme
+      client event renderer slots plugins lifecycle
+renderer.setTerminalTitle: function
+route.current: {name:"home"}   state.session.get: function
+lifecycle.onDispose: function
+```
+
+Design decisions and why:
+
+- **`tui.json`, not `opencode.json`.** `tui.json` has its own `plugin: []`
+  array, read only by the TUI. That keeps this file out of the server plugin
+  loader entirely - which matters because the two loaders want different module
+  shapes. A server plugin (`opencode-podman-status.js`) uses a named function
+  export and opencode refuses non-function exports; a TUI plugin must **default
+  export an object with `tui`** (`export default { id, tui }`). Both shapes were
+  confirmed against the real binary. The two plugins are therefore separate
+  files enabled in separate config files, installable and usable independently.
+- **Poll, do not take the title over.** Core rewrites the title on every route
+  and session-title change and there is no hook to stop it. The alternative -
+  dispatching `terminal.title.toggle` to turn core's title off - works, but
+  relies on an internal command name and persists `terminal_title_enabled:
+  false` in KV, which would leave a user who later removed the plugin with no
+  window title at all. The plugin instead polls `route.current` and
+  `state.session` once a second and re-applies its title every tick.
+- **Always write, never diff against the plugin's own last decision.** The
+  first shipped version only wrote when its inputs (route, session title,
+  enabled flag) changed since the previous tick, to avoid needless terminal
+  writes in steady state. This looked right in every test and in a short pty
+  capture, but broke in real use: on a real container the correct title showed
+  for about a second and then reverted to plain `OpenCode` and stayed there.
+  Cause: core's own title effect is a `createEffect`, which Solid always runs
+  once on mount **regardless of whether its inputs ever change again**. If
+  that first run happens after this plugin's first write - plugin loading and
+  core's own mount are not ordered - core's `OpenCode` clobbers it. From the
+  plugin's point of view nothing it depends on changed, so a diff-based tick
+  sees no reason to write again, and a static home screen has no future route
+  change to trigger a correction: the clobber is permanent. There is no signal
+  available to the plugin for "something else just wrote the title", so the
+  fix is to stop trying to detect changes at all and simply reassert the title
+  unconditionally on every tick - a once-a-second OSC write is cheap, and this
+  corrects any clobber, from core or anything else, within one poll interval
+  no matter its cause.
+- **Honour the toggle.** `terminal_title_enabled` is read each tick; when it is
+  off the plugin clears the title, exactly as core would, rather than fighting
+  a user who turned the feature off.
+- **Session-title truncation.** Core keeps the first 37 characters and appends
+  `…` when a session title exceeds 40; the plugin does the same so a long title
+  cannot make the window title unusable.
+- **Hostname source.** `HOSTNAME` from the environment first (settable at
+  container launch without changing the kernel hostname), then `os.hostname()`.
+  With no `--hostname`, podman gives the short container ID, which is what a
+  bare `opencode` in these containers shows anyway.
+
+`--title` (in the Rust binary, shipped in the same 0.4.0) prints this plugin's
+prefix, so a desktop shortcut can raise a container's window with the desktop's
+own tools (README, "Bringing a window into focus"). It resolves the host itself
+with one `podman inspect --format '{{json .Config.Hostname}} {{json
+.Config.Env}}'` and repeats this plugin's precedence - env `HOSTNAME`, trimmed
+and only when non-empty, then the system hostname. **The two resolvers must stay
+in step**: if they drift, `--title` prints a string that matches no window. The
+Rust side is `discover::resolve_host`; the plugin side is `resolveHost`.
+
+Code shape follows §6a's pattern: logic sits in pure helpers (`resolveHost`,
+`composeTitle`, `truncateTitle`, `evaluate`) and a `start()` that takes
+injectable interval functions, with the TUI entry point a thin wrapper.
+Everything is reachable as `module.tui.internals` for the Bun tests, and
+`api.renderer.setTerminalTitle` is wrapped so a renderer error can never break
+the poll loop.
+
+Verification: 24 Bun tests (`plugin/opencode-window-title.test.js`, including
+one that reproduces the mount-order clobber above by injecting a title write
+between two ticks and asserting the next tick corrects it), plus a live TUI
+check on 1.18.33 - a pty capture showed the plugin emit
+`\x1b]0;OpenCode (<hostname>)\x07`, with `<hostname>` the container's short
+container ID (it had no `--hostname`). The always-clobbered case that the diff
+version missed was only caught in an actual long-running container, not in the
+short (~15 s) pty captures used during development - the mount-order race is
+timing-dependent and did not reproduce in either the automated pty test or the
+first few seconds of real use, only after leaving it running.
+
+Caveats: this is an **undocumented, version-specific** API (see "Still to
+verify" 7). Wayland cannot read other clients' window titles, tmux may rewrite
+them, and containers sharing one terminal via tabs collapse to one title -
+which is why §7 still rejects the title as a *status* channel; this plugin only
+labels windows and carries no state.
+
 ## 7. Rejected approaches, and why
 
 | Approach | Why not |
@@ -733,7 +843,7 @@ injected probes (order, a hung probe, a panicking probe).
 | **Publish ports** (`-p` + `--hostname 0.0.0.0`) | Needs a per-container host port and exposes the unauthenticated API to every container on the network and to the host. Also hits the rootlesskit/pasta trap: forwarded traffic arrives at the container's interface address, not loopback, so a `127.0.0.1` bind silently never receives it. |
 | **`podman exec` + curl** | Needs an HTTP client in every image; 100–300 ms per exec, so nine containers get slow. |
 | **Plugin writing status files to a bind mount** | Push-based, but DAK polls on a timer, so observable freshness is identical — the advantage evaporates. Costs a bind mount per container, and gives the container a writable path into the host. *Reconsidered in 0.2.0:* a plugin that instead **serves** a read-only status API on the container's loopback (§6a) needs no mount, reuses the whole namespace transport unchanged, and removes the need for `--port` - which turned out to be the real security problem (§6). |
-| **Terminal window title** | opencode does set it, but only to `OpenCode` or `OC | <session title>` — **no status**. Adding status needs a plugin anyway, and reading titles is impossible on Wayland (no protocol to enumerate other clients' windows), collapses to one title if containers share a terminal via tabs, and is rewritten by tmux. |
+| **Terminal window title** | Rejected as a **status** channel: opencode only ever sets `OpenCode` or `OC | <session title>`, and reading titles is impossible on Wayland (no protocol to enumerate other clients' windows), collapses to one title if containers share a terminal via tabs, and is rewritten by tmux. *Reconsidered in 0.4.0:* a plugin can nonetheless **set** the title to label a window with its container (§6e) - it just cannot carry state. |
 | **mDNS (`--mdns`)** | Forces `0.0.0.0`, and *skips publishing entirely* when the hostname is loopback. Multicast does not cross slirp4netns/pasta. |
 | **Podman labels for slot numbers** | **Labels are immutable after container creation** — there is no `podman container update --label` (open feature request, podman #27815). The program could not assign them itself. Reading them is free (`podman ps --format json` returns `Labels`), so this remains a cheap future option if stable numbering is ever wanted. |
 | **Unix socket** | opencode binds host/port only; no socket-path option. |
@@ -838,3 +948,9 @@ injected probes (order, a hung probe, a panicking probe).
    payload fields (§6a), which are not a documented stable interface. If a
    future opencode renames them the plugin degrades to "everything done"; re-run
    the event capture described in §6a after upgrading opencode.
+7. **The window-title plugin across opencode upgrades** — it depends on the TUI
+   plugin API (`renderer.setTerminalTitle`, `route.current`,
+   `state.session.get`, `lifecycle`), which is new, undocumented and can change
+   (§6e). Its failure mode is cosmetic only - a stale or missing window title,
+   since the poll swallows errors - and it never affects the status plugin.
+   Re-check after upgrading opencode.

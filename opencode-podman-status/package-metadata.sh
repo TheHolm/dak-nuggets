@@ -35,6 +35,15 @@ opencode's full remote-control API, which lets anything that can reach it,
 including the agent itself, bypass every human approval check. opencode's own
 API is still supported, optionally with a password.
 
+It also includes a separate, optional opencode TUI plugin that puts the
+container's hostname into the terminal window title (OpenCode (<hostname>) on
+the home screen and OpenCode (<hostname>) | <session title> in a session), so
+instances in different containers can be told apart. Enable it independently
+by listing its path in tui.json. It is TUI-only and does nothing under
+opencode serve, web or the desktop app. The binary's --title option prints
+that same prefix for one container, so a desktop shortcut can raise its
+window.
+
 The container's loopback address is unreachable from the host. For each
 container, a short-lived child therefore joins the container's namespaces only
 to create sockets and hand them back; all queries run outside the container.
@@ -48,4 +57,4 @@ Intended for DAK's text_exec setup type, but usable from any script."
 # The major.minor this text was last checked against. Patch digits are
 # deliberately ignored: a patch release changes no behaviour by definition, so
 # it cannot invalidate the description.
-PKG_METADATA_REVIEWED_FOR="0.3"
+PKG_METADATA_REVIEWED_FOR="0.4"
