@@ -10,6 +10,11 @@ each container's opencode and to run opencode **without `--port`**. `opencode
 port can use it to skip every human check, and that includes the agent itself,
 from inside its own container. See [Security](#security).
 
+A second, optional **window-title plugin** puts the container's hostname into
+the opencode TUI's terminal window title, so instances in different containers
+can be told apart. It is independent of the status plugin and is enabled
+separately in `tui.json` - see [Window title plugin](#window-title-plugin).
+
 **Linux only.** It works by creating sockets inside rootless podman containers'
 network namespaces, and rootless podman does not exist on FreeBSD. See
 [Platform support](#platform-support).
@@ -145,6 +150,62 @@ What the plugin does:
 - Its data comes from opencode's own events as they happen. A freshly started
   instance therefore shows `done` with an unknown age (`--:--`) until something
   happens in it.
+
+## Window title plugin
+
+A second, optional plugin puts the container's hostname into the opencode
+TUI's terminal window title - what a terminal emulator and tmux show in the
+title bar or window list:
+
+| View | Title |
+|---|---|
+| Home screen | `OpenCode (<hostname>)` |
+| Inside a session | `OpenCode (<hostname>) | <session title>` |
+
+opencode itself only ever sets `OpenCode` on the home screen or
+`OC | <session title>` in a session, with no config key for a custom title, so
+without this every container's window looks the same. `<hostname>` is
+`HOSTNAME` from opencode's environment when it is set, otherwise the system
+hostname (`os.hostname()`). In a rootless podman container with no
+`--hostname`, that is the short container ID; pass `--hostname <name>` (or
+`-e HOSTNAME=<name>`) for a friendlier one.
+
+The plugin is installed by the package at:
+
+| Installed by | Location |
+|---|---|
+| `.deb` (Debian, Ubuntu, and the `dak-nuggets` bundle) | `/usr/share/opencode-podman-status/opencode-window-title.js` |
+| `make install` | `$PREFIX/share/opencode-podman-status/opencode-window-title.js` (default `PREFIX=/usr/local`) |
+| FreeBSD `.pkg` | not packaged, since the program is Linux-only |
+
+It is a **TUI plugin**, loaded from `tui.json` rather than `opencode.json`, and
+is independent of the status plugin: enable either, both, or neither. Add its
+path to the `plugin` array of the `tui.json` that opencode reads, for example
+the global `~/.config/opencode/tui.json` inside the container:
+
+```json
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": ["/usr/share/opencode-podman-status/opencode-window-title.js"]
+}
+```
+
+Restart opencode after the change. The title follows the session: it is
+re-applied when you move between the home screen and a session, and when the
+session title changes. The session title is truncated the way opencode
+truncates it (longer than 40 characters becomes the first 37 plus `…`).
+Turning off the command palette's "terminal title" toggle turns this plugin's
+title off too, matching opencode's own behaviour.
+
+Notes:
+
+- **TUI only.** Under `opencode serve`, `opencode web` or the desktop app there
+  is no TUI, so the plugin does nothing.
+- **The title is not a status channel.** Wayland gives no way to read other
+  clients' window titles, tmux may rewrite them, and several containers sharing
+  one terminal collapse to a single title - which is also why the status
+  program reports state over HTTP rather than through titles
+  ([NOTES.md](NOTES.md) §7).
 
 ## Usage
 

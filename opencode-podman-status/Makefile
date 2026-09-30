@@ -16,6 +16,7 @@ PREFIX  ?= /usr/local
 DESTDIR ?=
 BIN = target/release/opencode-podman-status
 PLUGIN = plugin/opencode-podman-status.js
+PLUGIN_TITLE = plugin/opencode-window-title.js
 BUN ?= bun
 
 # Prepended to every recipe. Each recipe line runs in its own shell, so the
@@ -34,8 +35,8 @@ all: build
 build:
 	@$(LINUX_ONLY); cargo build --release
 
-# The status plugin's tests need Bun (https://bun.sh). Without it they are
-# skipped with a message rather than failing the build: nothing in the build or
+# The plugins' tests need Bun (https://bun.sh). Without it they are skipped
+# with a message rather than failing the build: nothing in the build or
 # packaging needs Bun, only running these tests does.
 test:
 	@$(LINUX_ONLY); cargo test
@@ -64,7 +65,8 @@ install: build
 	@$(LINUX_ONLY); \
 	mkdir -p "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/share/opencode-podman-status"; \
 	install -m 755 $(BIN) "$(DESTDIR)$(PREFIX)/bin/opencode-podman-status"; \
-	install -m 644 $(PLUGIN) "$(DESTDIR)$(PREFIX)/share/opencode-podman-status/opencode-podman-status.js"
+	install -m 644 $(PLUGIN) "$(DESTDIR)$(PREFIX)/share/opencode-podman-status/opencode-podman-status.js"; \
+	install -m 644 $(PLUGIN_TITLE) "$(DESTDIR)$(PREFIX)/share/opencode-podman-status/opencode-window-title.js"
 
 clean:
 	@$(LINUX_ONLY); cargo clean

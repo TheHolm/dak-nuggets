@@ -70,12 +70,16 @@ install -D -m 755 \
     "$build_dir/release/opencode-podman-status" \
     "$stage_dir/usr/bin/opencode-podman-status"
 
-# The status plugin is architecture-independent data loaded by opencode, so it
-# goes under /usr/share/<package>/ per Debian policy. Users point opencode.json
-# at this exact path - see README.markdown - so it must not move.
+# The plugins are architecture-independent data loaded by opencode, so they go
+# under /usr/share/<package>/ per Debian policy. Users point opencode.json (the
+# status plugin) or tui.json (the window-title plugin) at these exact paths -
+# see README.markdown - so they must not move.
 install -D -m 644 \
     "$here/plugin/opencode-podman-status.js" \
     "$stage_dir/usr/share/opencode-podman-status/opencode-podman-status.js"
+install -D -m 644 \
+    "$here/plugin/opencode-window-title.js" \
+    "$stage_dir/usr/share/opencode-podman-status/opencode-window-title.js"
 
 deb="$dist_dir/opencode-podman-status_${version}-${revision}_${arch}.deb"
 
@@ -97,3 +101,4 @@ step_done "opencode-podman-status: packaged (.deb)"
 contents="$(dpkg-deb -c "$deb")"
 grep -qF 'usr/bin/opencode-podman-status' <<<"$contents"
 grep -qF 'usr/share/opencode-podman-status/opencode-podman-status.js' <<<"$contents"
+grep -qF 'usr/share/opencode-podman-status/opencode-window-title.js' <<<"$contents"

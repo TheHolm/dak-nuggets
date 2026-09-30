@@ -74,6 +74,12 @@ and run opencode **without `--port`**. `opencode --port` still works, but it
 exposes opencode's full remote-control API, which lets anything that can reach
 it, including the agent itself, skip every human approval check.
 
+A second, independent plugin can put the container's hostname into the opencode
+TUI's window title (`OpenCode (<hostname>)`, with the session title appended in
+a session), so instances in different containers can be told apart. It is
+enabled from `tui.json` at
+`/usr/share/opencode-podman-status/opencode-window-title.js`.
+
 See
 [opencode-podman-status/README.markdown](opencode-podman-status/README.markdown)
 for full details, including the security section.
